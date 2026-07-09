@@ -23,7 +23,7 @@ export default function LoginPage() {
     }
 
     // router.pushではなくwindow.locationで強制的に遷移
-    window.location.href = '/'
+    window.location.href = '/expenses'
   }
 
   return (
