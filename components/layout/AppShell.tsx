@@ -3,15 +3,18 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase/client'
-import { LayoutDashboard, Receipt, Users, BarChart3, FileText, LogOut, Menu, X, Plus, Banknote } from 'lucide-react'
+import { LayoutDashboard, Receipt, Users, BarChart3, FileText, LogOut, Menu, X, Plus, Banknote, Wallet, Calendar, ShieldCheck } from 'lucide-react'
 import type { AppUser } from '@/lib/supabase/types'
 
 const NAV = [
-  { href:'/',           label:'ダッシュボード', icon:LayoutDashboard },
-  { href:'/expenses',   label:'経費管理',       icon:Receipt },
-  { href:'/activities', label:'活動管理',       icon:Users },
-  { href:'/budget',     label:'予算管理',       icon:BarChart3 },
-  { href:'/reports',    label:'月次レポート',   icon:FileText },
+  { href:'/',            label:'ダッシュボード', icon:LayoutDashboard },
+  { href:'/expenses',    label:'経費管理',       icon:Receipt },
+  { href:'/activities',  label:'活動管理',       icon:Users },
+  { href:'/budget',      label:'予算管理',       icon:BarChart3 },
+  { href:'/payroll',     label:'給与管理',       icon:Wallet },
+  { href:'/tax',         label:'税務カレンダー', icon:Calendar },
+  { href:'/visa',        label:'ビザ・WP管理',  icon:ShieldCheck },
+  { href:'/reports',     label:'月次レポート',   icon:FileText },
 ]
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -33,12 +36,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   async function logout() {
     await supabase.auth.signOut()
-    router.push('/login'); router.refresh()
+    window.location.href = '/login'
   }
 
   const SideNav = () => (
     <nav className="flex flex-col h-full">
-      <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-100">
+      <div className="flex items-center gap-3 px-4 py-4 border-b border-slate-100">
         <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
           <span className="text-white text-sm font-bold">T</span>
         </div>
@@ -47,13 +50,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <p className="text-xs text-slate-500">管理システム</p>
         </div>
       </div>
-      <div className="flex-1 py-3 px-2 space-y-0.5">
+      <div className="flex-1 py-2 px-2 space-y-0.5 overflow-y-auto">
         {NAV.map(({ href, label, icon: Icon }) => (
           <Link key={href} href={href} onClick={() => setMobileOpen(false)}
-            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
               isActive(href) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}>
-            <Icon size={16} className="shrink-0" />{label}
+            <Icon size={15} className="shrink-0" />{label}
           </Link>
         ))}
       </div>
@@ -65,10 +68,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div className="min-w-0">
               <p className="text-xs font-medium text-slate-900 truncate">{profile.name}</p>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                profile.role === 'sales' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-              }`}>
-                {profile.role === 'sales' ? '営業' : '総務'}
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${profile.role==='sales'?'bg-blue-100 text-blue-700':'bg-purple-100 text-purple-700'}`}>
+                {profile.role==='sales'?'営業':'総務'}
               </span>
             </div>
           </div>
@@ -85,7 +86,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       <aside className="hidden md:flex flex-col w-56 bg-white border-r border-slate-200 shrink-0">
         <SideNav />
       </aside>
-
       {mobileOpen && (
         <div className="fixed inset-0 z-50 md:hidden">
           <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
@@ -95,7 +95,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </aside>
         </div>
       )}
-
       <div className="flex-1 flex flex-col min-w-0">
         <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-slate-200">
           <button onClick={() => setMobileOpen(true)} className="p-1.5 rounded-md hover:bg-slate-100"><Menu size={20} /></button>
@@ -103,7 +102,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </header>
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
-
       <QuickInput />
     </div>
   )
@@ -155,7 +153,7 @@ function QuickInput() {
               </button>
               <button onClick={() => setMode('expense')} className="flex items-center gap-3 w-full p-3 rounded-xl border hover:bg-slate-50 text-left">
                 <Banknote size={18} className="text-green-500 shrink-0" />
-                <div><p className="text-sm font-medium">経費を入力</p><p className="text-xs text-slate-500">Supabaseへ即時保存</p></div>
+                <div><p className="text-sm font-medium">経費を入力</p><p className="text-xs text-slate-500">THBで入力・JPY自動換算</p></div>
               </button>
             </div>
           )}
@@ -175,7 +173,7 @@ function QuickInput() {
           )}
           {mode === 'expense' && (
             <div className="space-y-3">
-              <p className="text-xs font-medium text-slate-500">経費入力</p>
+              <p className="text-xs font-medium text-slate-500">経費入力（THBベース）</p>
               <div className="grid grid-cols-2 gap-2">
                 <select value={eForm.category} onChange={e => setEForm(f => ({ ...f, category:e.target.value }))} className="border rounded-lg px-2 py-2 text-xs bg-white">
                   {['給与','家賃','通信費','交通費','接待交際費','出張費','備品','その他'].map(c => <option key={c}>{c}</option>)}
@@ -185,10 +183,14 @@ function QuickInput() {
                 </select>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-400">฿</span>
-                <input type="number" className="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="金額" value={eForm.amount} onChange={e => setEForm(f => ({ ...f, amount:e.target.value }))} />
-                {eForm.amount && <span className="text-xs text-slate-500 whitespace-nowrap">≈ ¥{Math.round(parseFloat(eForm.amount)*RATE).toLocaleString()}</span>}
+                <span className="text-sm text-slate-400 font-medium">฿</span>
+                <input type="number" className="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="金額（THB）" value={eForm.amount} onChange={e => setEForm(f => ({ ...f, amount:e.target.value }))} />
               </div>
+              {eForm.amount && (
+                <div className="bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-700">
+                  ฿{parseFloat(eForm.amount).toLocaleString()} ≈ ¥{Math.round(parseFloat(eForm.amount)*RATE).toLocaleString()}
+                </div>
+              )}
               <div className="flex gap-2">
                 <button onClick={() => setMode('menu')} className="flex-1 py-2 text-sm border rounded-lg hover:bg-slate-50">戻る</button>
                 <button onClick={saveExpense} disabled={saving || !eForm.amount} className="flex-1 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '記録する'}</button>
