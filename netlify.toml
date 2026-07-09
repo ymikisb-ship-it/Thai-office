@@ -1,0 +1,23 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NEXT_TELEMETRY_DISABLED = "1"
+  # ============================================================
+  # ↓↓↓ ここを書き換えてください（2箇所）↓↓↓
+  # Supabase の Settings > API で確認できます
+  # ============================================================
+  NEXT_PUBLIC_SUPABASE_URL = "https://ylgojcvczkvcxgepgyym.supabase.co"
+  NEXT_PUBLIC_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlsZ29qY3Zjemt2Y3hnZXBneXltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyNDU2OTEsImV4cCI6MjA5ODgyMTY5MX0.BF5BKUB9heTfSWEzX4HgRzylv9ugHb0LG92NfYpq-mk"
+  # ============================================================
+  # AIレポート生成キー（任意）
+  # 未設定でもアプリは全機能使えます
+  # ANTHROPIC_API_KEY = "sk-ant-ここにキーを貼る"
+  # ============================================================
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[functions]
+  node_bundler = "nft"
