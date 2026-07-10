@@ -22,6 +22,13 @@ export interface Budget {
   id:string; fiscal_year:number; month:number; category:string
   amount_thb:number; amount_jpy:number; updated_at:string
 }
+export interface BudgetLineItem {
+  id:string; category:ExpenseCategory; label:string; sort_order:number; created_at:string
+}
+export interface BudgetLineAmount {
+  id:string; fiscal_year:number; month:number; line_item_id:string
+  amount_thb:number; updated_at:string
+}
 export interface MonthlyReport {
   id:string; year:number; month:number; ai_draft:string|null
   final_text:string|null; status:ReportStatus
