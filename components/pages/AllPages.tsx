@@ -864,3 +864,69 @@ export function VisaWPPage() {
     </div>
   )
 }
+
+// ─── システム設定 ──────────────────────────────────────────────
+export function SettingsPage() {
+  const supabase = createBrowserClient()
+  const [rate, setRate] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    supabase.from('settings').select('*').eq('key', 'exchange_rate').single()
+      .then(({ data }) => { if (data) setRate(data.value); setLoading(false) })
+  }, [])
+
+  async function save() {
+    if (!rate || isNaN(parseFloat(rate))) return
+    setSaving(true)
+    await supabase.from('settings').update({ value: rate, updated_at: new Date().toISOString() }).eq('key', 'exchange_rate')
+    setSaving(false); setMsg('保存しました'); setTimeout(() => setMsg(''), 3000)
+  }
+
+  return (
+    <div className="p-6 space-y-6 max-w-xl">
+      <div><h1 className="text-xl font-bold text-slate-900">システム設定</h1>
+        <p className="text-sm text-slate-500 mt-0.5">為替レートなどの基本設定</p></div>
+
+      <Card><CardContent className="pt-5 space-y-4">
+        <div>
+          <p className="text-sm font-semibold text-slate-700 mb-3">為替レート設定</p>
+          {loading ? <p className="text-sm text-slate-400">読み込み中...</p> : (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <Label className="text-xs text-slate-500">1 THB = ? 円</Label>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 flex-1">
+                    <span className="text-sm text-slate-500">1 THB =</span>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={rate}
+                      onChange={e => setRate(e.target.value)}
+                      className="w-32 h-9 text-sm"
+                      placeholder="4.80"
+                    />
+                    <span className="text-sm text-slate-500">円</span>
+                  </div>
+                  <Button size="sm" onClick={save} disabled={saving} className="shrink-0">
+                    {saving ? '保存中...' : '保存'}
+                  </Button>
+                </div>
+              </div>
+              {rate && !isNaN(parseFloat(rate)) && (
+                <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700">
+                  <p>例：฿10,000 = ¥{Math.round(10000 * parseFloat(rate)).toLocaleString()}</p>
+                  <p>例：฿100,000 = ¥{Math.round(100000 * parseFloat(rate)).toLocaleString()}</p>
+                </div>
+              )}
+              {msg && <p className="text-sm text-green-600">{msg}</p>}
+              <p className="text-xs text-slate-400">※ 変更後は新規入力分から反映されます。過去データの換算値は変わりません。</p>
+            </div>
+          )}
+        </div>
+      </CardContent></Card>
+    </div>
+  )
+}
