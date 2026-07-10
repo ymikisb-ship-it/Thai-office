@@ -405,6 +405,243 @@ export function ActivitiesContent() {
 const MONTHS=Array.from({length:12},(_,i)=>i+1)
 function pctColor(a:number,b:number){ if(b===0) return ''; const r=a/b; return r>1.1?'text-red-600 font-semibold':r>.9?'text-amber-600':'text-green-700' }
 
+export function BudgetContent() {
+  const supabase = createBrowserClient()
+  const now = new Date()
+  const [year, setYear] = useState(now.getFullYear())
+  const [selMonth, setSelMonth] = useState(now.getMonth()+1)
+  const [bm, setBm] = useState<Record<string,Record<number,number>>>({})
+  const [am, setAm] = useState<Record<string,Record<number,number>>>({})
+  const [categories, setCategories] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState<Set<string>>(new Set())
+  const [msg, setMsg] = useState('')
+  const [rate, setRate] = useState(4.8)
+  const MONTHS = Array.from({length:12},(_,i)=>i+1)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    // 為替レート取得
+    const { data: rateData } = await supabase.from('settings').select('value').eq('key','exchange_rate').single()
+    if (rateData) setRate(parseFloat(rateData.value))
+
+    const [bRes, eRes] = await Promise.all([
+      supabase.from('budgets').select('*').eq('fiscal_year', year),
+      supabase.from('expenses').select('category,expense_date,amount_thb').gte('expense_date',`${year}-01-01`).lte('expense_date',`${year}-12-31`)
+    ])
+
+    // 予算データをカテゴリ×月のマップに変換
+    const newBm: Record<string,Record<number,number>> = {}
+    const cats = new Set<string>()
+    for (const b of (bRes.data ?? [])) {
+      if (!newBm[b.category]) newBm[b.category] = {}
+      newBm[b.category][b.month] = b.amount_thb
+      cats.add(b.category)
+    }
+    setBm(newBm)
+    setCategories([...cats])
+
+    // 実績データをカテゴリ×月のマップに変換（THBベース）
+    const newAm: Record<string,Record<number,number>> = {}
+    for (const e of (eRes.data ?? [])) {
+      const m = parseInt(e.expense_date.slice(5,7))
+      if (!newAm[e.category]) newAm[e.category] = {}
+      newAm[e.category][m] = (newAm[e.category][m] ?? 0) + e.amount_thb
+    }
+    setAm(newAm)
+    setLoading(false)
+  }, [year])
+  useEffect(() => { load() }, [load])
+
+  function updateCell(cat: string, m: number, val: string) {
+    const thb = val === '' ? 0 : parseFloat(val) || 0
+    setBm(p => ({ ...p, [cat]: { ...p[cat], [m]: thb } }))
+    setDirty(p => new Set(p).add(`${cat}__${m}`))
+  }
+
+  async function save() {
+    if (!dirty.size) return; setSaving(true)
+    const ups = []
+    for (const key of dirty) {
+      const [cat, ms] = key.split('__'); const m = parseInt(ms)
+      const thb = bm[cat]?.[m] ?? 0
+      ups.push({ fiscal_year: year, month: m, category: cat, amount_thb: thb, amount_jpy: Math.round(thb * rate), updated_at: new Date().toISOString() })
+    }
+    await supabase.from('budgets').upsert(ups, { onConflict: 'fiscal_year,month,category' })
+    setDirty(new Set()); setSaving(false)
+    setMsg(`${ups.length}件保存しました`); setTimeout(() => setMsg(''), 3000); load()
+  }
+
+  const pctColor = (a: number, b: number) => {
+    if (b === 0) return ''
+    const r = a/b
+    return r > 1.1 ? 'text-red-600 font-semibold' : r > 0.9 ? 'text-amber-600' : 'text-green-700'
+  }
+
+  const totalB = categories.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (bm[c]?.[m] ?? 0), 0), 0)
+  const totalA = categories.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (am[c]?.[m] ?? 0), 0), 0)
+
+  if (loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
+
+  return (
+    <div className="p-6 space-y-5 max-w-5xl">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">予算管理</h1>
+          <p className="text-sm text-slate-500 mt-0.5">THBベース・セルをクリックして直接編集 / 1THB = {rate}円</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={String(year)} onValueChange={v => setYear(Number(v))}>
+            <SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger>
+            <SelectContent>
+              {[2026, 2027, 2028].map(y => <SelectItem key={y} value={String(y)}>{y}年度</SelectItem>)}
+            </SelectContent>
+          </Select>
+          {dirty.size > 0 && <span className="text-xs bg-amber-50 text-amber-700 border border-amber-200 px-2 py-1 rounded">未保存 {dirty.size}件</span>}
+          {msg && <span className="text-xs bg-green-50 text-green-700 border border-green-200 px-2 py-1 rounded">{msg}</span>}
+          <Button size="sm" onClick={save} disabled={saving || !dirty.size} className="h-8">{saving ? '保存中...' : '保存する'}</Button>
+        </div>
+      </div>
+
+      {/* KPIカード */}
+      <div className="grid grid-cols-4 gap-3">
+        {[
+          { label:`${year}年度 予算総額`, value:`฿${Math.round(totalB).toLocaleString()}`, sub:`¥${Math.round(totalB*rate/10000)}万` },
+          { label:'実績累計', value:`฿${Math.round(totalA).toLocaleString()}`, sub:`¥${Math.round(totalA*rate/10000)}万` },
+          { label:'消化率', value:`${totalB > 0 ? Math.round(totalA/totalB*100) : 0}%`, warn: totalA > totalB*0.9 },
+          { label:'残予算', value:`฿${Math.round(Math.max(totalB-totalA,0)).toLocaleString()}`, sub:`¥${Math.round(Math.max(totalB-totalA,0)*rate/10000)}万`, warn: totalA > totalB },
+        ].map(c => (
+          <Card key={c.label}><CardContent className="pt-4 pb-3">
+            <p className="text-xs text-slate-500 mb-1">{c.label}</p>
+            <p className={`text-xl font-bold ${c.warn ? 'text-red-600' : 'text-slate-900'}`}>{c.value}</p>
+            {c.sub && <p className="text-xs text-slate-400 mt-0.5">{c.sub}</p>}
+          </CardContent></Card>
+        ))}
+      </div>
+
+      {/* 月別バー */}
+      <Card>
+        <CardHeader className="pb-3"><CardTitle className="text-sm font-medium">月別 消化状況（クリックで選択）</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-12 gap-1.5">
+            {MONTHS.map(m => {
+              const b = categories.reduce((s,c) => s + (bm[c]?.[m] ?? 0), 0)
+              const a = categories.reduce((s,c) => s + (am[c]?.[m] ?? 0), 0)
+              const pct = b > 0 ? Math.min(a/b*100, 100) : 0
+              const isOver = a > b && b > 0
+              const isSel = m === selMonth
+              return (
+                <button key={m} onClick={() => setSelMonth(m)}
+                  className={`rounded-xl border p-2 text-left transition-all ${isSel ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                  <p className={`text-[10px] font-medium mb-1.5 ${isSel ? 'text-blue-600' : 'text-slate-500'}`}>{m}月</p>
+                  <div style={{height:28,display:'flex',alignItems:'flex-end'}}>
+                    <div style={{width:'100%',height:`${Math.max(pct,3)}%`,background:isOver?'#dc2626':pct>75?'#d97706':'#16a34a',borderRadius:2}}/>
+                  </div>
+                  <p style={{fontSize:10,marginTop:3,color:isOver?'#dc2626':'#94a3b8'}}>{b>0?`${Math.round(pct)}%`:'未'}</p>
+                </button>
+              )
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* カテゴリ別詳細 */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-medium">{year}年 {selMonth}月 — カテゴリ別（THBベース）</CardTitle>
+            <div className="flex gap-1.5">
+              <button className="text-xs px-2 py-1 rounded border hover:bg-slate-50 text-slate-500 disabled:opacity-30" onClick={() => setSelMonth(m => Math.max(1,m-1))} disabled={selMonth===1}>← 前月</button>
+              <button className="text-xs px-2 py-1 rounded border hover:bg-slate-50 text-slate-500 disabled:opacity-30" onClick={() => setSelMonth(m => Math.min(12,m+1))} disabled={selMonth===12}>翌月 →</button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {categories.length === 0 ? (
+            <p className="text-sm text-slate-400 text-center py-8">この月の予算データがありません</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead><tr className="border-b">
+                <th className="text-left py-2 pr-4 text-xs font-medium text-slate-500">カテゴリ</th>
+                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">予算（THB）</th>
+                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">実績（THB）</th>
+                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">差異（THB）</th>
+                <th className="text-right py-2 pl-3 text-xs font-medium text-slate-500">消化率</th>
+              </tr></thead>
+              <tbody>
+                {categories.map(cat => {
+                  const b = bm[cat]?.[selMonth] ?? 0
+                  const a = am[cat]?.[selMonth] ?? 0
+                  const v = a - b
+                  const rateVal = b > 0 ? Math.round(a/b*100) : null
+                  return (
+                    <tr key={cat} className="border-b hover:bg-slate-50">
+                      <td className="py-3 pr-4 font-medium text-sm">{cat}</td>
+                      <td className="py-3 px-3 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <span className="text-xs text-slate-400">฿</span>
+                          <input type="number" value={b === 0 ? '' : Math.round(b)}
+                            onChange={e => updateCell(cat, selMonth, e.target.value)}
+                            placeholder="0"
+                            className="w-28 text-right text-sm bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
+                        </div>
+                        {b > 0 && <p className="text-[10px] text-slate-400 text-right">¥{Math.round(b*rate).toLocaleString()}</p>}
+                      </td>
+                      <td className="py-3 px-3 text-right text-sm">
+                        {a > 0 ? <div><p>฿{Math.round(a).toLocaleString()}</p><p className="text-[10px] text-slate-400">¥{Math.round(a*rate).toLocaleString()}</p></div> : '—'}
+                      </td>
+                      <td className={`py-3 px-3 text-right text-sm ${pctColor(a,b)}`}>
+                        {b === 0 ? '—' : <div><p>{(v>0?'+':'') + `฿${Math.round(v).toLocaleString()}`}</p><p className="text-[10px]">{(v>0?'+':'') + `¥${Math.round(v*rate).toLocaleString()}`}</p></div>}
+                      </td>
+                      <td className="py-3 pl-3 text-right">
+                        {rateVal !== null ? (
+                          <div>
+                            <span className={`text-xs font-semibold ${pctColor(a,b)}`}>{rateVal}%</span>
+                            <div style={{height:3,background:'#e2e8f0',borderRadius:2,marginTop:3}}>
+                              <div style={{width:`${Math.min(rateVal,100)}%`,height:'100%',borderRadius:2,background:rateVal>100?'#dc2626':rateVal>90?'#d97706':'#16a34a'}}/>
+                            </div>
+                          </div>
+                        ) : <span className="text-xs text-slate-400">—</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
+                {/* 合計行 */}
+                {(() => {
+                  const tb = categories.reduce((s,c) => s + (bm[c]?.[selMonth] ?? 0), 0)
+                  const ta = categories.reduce((s,c) => s + (am[c]?.[selMonth] ?? 0), 0)
+                  return (
+                    <tr className="border-t-2 bg-slate-50">
+                      <td className="py-3 pr-4 font-bold text-sm">合計</td>
+                      <td className="py-3 px-3 text-right font-bold text-sm">
+                        <p>฿{Math.round(tb).toLocaleString()}</p>
+                        <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(tb*rate).toLocaleString()}</p>
+                      </td>
+                      <td className="py-3 px-3 text-right font-bold text-sm">
+                        <p>฿{Math.round(ta).toLocaleString()}</p>
+                        <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(ta*rate).toLocaleString()}</p>
+                      </td>
+                      <td className={`py-3 px-3 text-right font-bold text-sm ${pctColor(ta,tb)}`}>
+                        <p>{tb===0?'—':(ta-tb>0?'+':'')+'฿'+Math.round(ta-tb).toLocaleString()}</p>
+                        <p className="text-[10px] font-normal">{tb===0?'':((ta-tb>0?'+':'')+'¥'+Math.round((ta-tb)*rate).toLocaleString())}</p>
+                      </td>
+                      <td className="py-3 pl-3 text-right">
+                        {tb > 0 && <span className={`text-xs font-bold ${pctColor(ta,tb)}`}>{Math.round(ta/tb*100)}%</span>}
+                      </td>
+                    </tr>
+                  )
+                })()}
+              </tbody>
+            </table>
+          )}
+          <p className="text-xs text-slate-400 mt-3">予算額（THB）を入力→「保存する」で確定。為替: 1THB = {rate}円（設定画面で変更可）</p>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+    
 export function ReportsContent() {
   const supabase = createBrowserClient()
   const now = new Date()
