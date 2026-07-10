@@ -1,6 +1,7 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, Fragment } from 'react'
 import { createBrowserClient } from '@/lib/supabase/client'
+import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,7 +13,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { Plus, Download, Paperclip, Sparkles, FileText, Check } from 'lucide-react'
 import { CATEGORIES, PAYMENT_METHODS, ACTIVITY_TYPES, RATE } from '@/lib/utils'
 import { createWorker, type Worker as TesseractWorker } from 'tesseract.js'
-import type { Expense, Activity, Budget, MonthlyReport, ExpenseCategory, PaymentMethod, ActivityType } from '@/lib/supabase/types'
+import type { Expense, Activity, Budget, MonthlyReport, ExpenseCategory, PaymentMethod, ActivityType, BudgetLineItem } from '@/lib/supabase/types'
 
 // ─── 共通 ─────────────────────────────────────────────────────
 function KPICard({ label, value, sub, warn }: { label:string; value:string; sub?:string; warn?:boolean }) {
@@ -558,7 +559,9 @@ export function BudgetContent() {
   const [selMonth, setSelMonth] = useState(now.getMonth()+1)
   const [bm, setBm] = useState<Record<string,Record<number,number>>>({})
   const [am, setAm] = useState<Record<string,Record<number,number>>>({})
-  const [categories, setCategories] = useState<string[]>([])
+  const [lineItems, setLineItems] = useState<Record<string, BudgetLineItem[]>>({})
+  const [lineAmounts, setLineAmounts] = useState<Record<string, Record<number,number>>>({})
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState<Set<string>>(new Set())
@@ -572,21 +575,20 @@ export function BudgetContent() {
     const { data: rateData } = await supabase.from('settings').select('value').eq('key','exchange_rate').single()
     if (rateData) setRate(parseFloat(rateData.value))
 
-    const [bRes, eRes] = await Promise.all([
+    const [bRes, eRes, liRes, laRes] = await Promise.all([
       supabase.from('budgets').select('*').eq('fiscal_year', year),
-      supabase.from('expenses').select('category,expense_date,amount_thb').gte('expense_date',`${year}-01-01`).lte('expense_date',`${year}-12-31`)
+      supabase.from('expenses').select('category,expense_date,amount_thb').gte('expense_date',`${year}-01-01`).lte('expense_date',`${year}-12-31`),
+      supabase.from('budget_line_items').select('*').order('category').order('sort_order'),
+      supabase.from('budget_line_amounts').select('*').eq('fiscal_year', year),
     ])
 
     // 予算データをカテゴリ×月のマップに変換
     const newBm: Record<string,Record<number,number>> = {}
-    const cats = new Set<string>()
     for (const b of (bRes.data ?? [])) {
       if (!newBm[b.category]) newBm[b.category] = {}
       newBm[b.category][b.month] = b.amount_thb
-      cats.add(b.category)
     }
     setBm(newBm)
-    setCategories([...cats])
 
     // 実績データをカテゴリ×月のマップに変換（THBベース）
     const newAm: Record<string,Record<number,number>> = {}
@@ -596,9 +598,35 @@ export function BudgetContent() {
       newAm[e.category][m] = (newAm[e.category][m] ?? 0) + e.amount_thb
     }
     setAm(newAm)
+
+    // 予算内訳マスタ（カテゴリごとの明細一覧）
+    const newLineItems: Record<string, BudgetLineItem[]> = {}
+    for (const li of (liRes.data ?? [])) {
+      if (!newLineItems[li.category]) newLineItems[li.category] = []
+      newLineItems[li.category].push(li)
+    }
+    setLineItems(newLineItems)
+
+    // 内訳ごとの月次金額
+    const newLineAmounts: Record<string, Record<number,number>> = {}
+    for (const la of (laRes.data ?? [])) {
+      if (!newLineAmounts[la.line_item_id]) newLineAmounts[la.line_item_id] = {}
+      newLineAmounts[la.line_item_id][la.month] = la.amount_thb
+    }
+    setLineAmounts(newLineAmounts)
+
     setLoading(false)
   }, [year])
   useEffect(() => { load() }, [load])
+
+  // 内訳マスタが設定されているカテゴリは、内訳の合計をカテゴリの予算として扱う
+  const hasLineItems = (cat: string) => (lineItems[cat]?.length ?? 0) > 0
+  function budgetFor(cat: string, m: number) {
+    if (hasLineItems(cat)) {
+      return (lineItems[cat] ?? []).reduce((s, li) => s + (lineAmounts[li.id]?.[m] ?? 0), 0)
+    }
+    return bm[cat]?.[m] ?? 0
+  }
 
   function updateCell(cat: string, m: number, val: string) {
     const thb = val === '' ? 0 : parseFloat(val) || 0
@@ -606,17 +634,35 @@ export function BudgetContent() {
     setDirty(p => new Set(p).add(`${cat}__${m}`))
   }
 
+  function updateLineCell(lineItemId: string, m: number, val: string) {
+    const thb = val === '' ? 0 : parseFloat(val) || 0
+    setLineAmounts(p => ({ ...p, [lineItemId]: { ...p[lineItemId], [m]: thb } }))
+    setDirty(p => new Set(p).add(`line__${lineItemId}__${m}`))
+  }
+
+  function toggleExpand(cat: string) {
+    setExpanded(p => { const n = new Set(p); if (n.has(cat)) n.delete(cat); else n.add(cat); return n })
+  }
+
   async function save() {
     if (!dirty.size) return; setSaving(true)
-    const ups = []
+    const budgetUps: { fiscal_year:number; month:number; category:string; amount_thb:number; amount_jpy:number; updated_at:string }[] = []
+    const lineUps: { fiscal_year:number; month:number; line_item_id:string; amount_thb:number; updated_at:string }[] = []
     for (const key of dirty) {
-      const [cat, ms] = key.split('__'); const m = parseInt(ms)
-      const thb = bm[cat]?.[m] ?? 0
-      ups.push({ fiscal_year: year, month: m, category: cat, amount_thb: thb, amount_jpy: Math.round(thb * rate), updated_at: new Date().toISOString() })
+      if (key.startsWith('line__')) {
+        const [, lineItemId, ms] = key.split('__'); const m = parseInt(ms)
+        const thb = lineAmounts[lineItemId]?.[m] ?? 0
+        lineUps.push({ fiscal_year: year, month: m, line_item_id: lineItemId, amount_thb: thb, updated_at: new Date().toISOString() })
+      } else {
+        const [cat, ms] = key.split('__'); const m = parseInt(ms)
+        const thb = bm[cat]?.[m] ?? 0
+        budgetUps.push({ fiscal_year: year, month: m, category: cat, amount_thb: thb, amount_jpy: Math.round(thb * rate), updated_at: new Date().toISOString() })
+      }
     }
-    await supabase.from('budgets').upsert(ups, { onConflict: 'fiscal_year,month,category' })
+    if (budgetUps.length) await supabase.from('budgets').upsert(budgetUps, { onConflict: 'fiscal_year,month,category' })
+    if (lineUps.length) await supabase.from('budget_line_amounts').upsert(lineUps, { onConflict: 'fiscal_year,month,line_item_id' })
     setDirty(new Set()); setSaving(false)
-    setMsg(`${ups.length}件保存しました`); setTimeout(() => setMsg(''), 3000); load()
+    setMsg(`${budgetUps.length + lineUps.length}件保存しました`); setTimeout(() => setMsg(''), 3000); load()
   }
 
   const pctColor = (a: number, b: number) => {
@@ -625,8 +671,8 @@ export function BudgetContent() {
     return r > 1.1 ? 'text-red-600 font-semibold' : r > 0.9 ? 'text-amber-600' : 'text-green-700'
   }
 
-  const totalB = categories.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (bm[c]?.[m] ?? 0), 0), 0)
-  const totalA = categories.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (am[c]?.[m] ?? 0), 0), 0)
+  const totalB = CATEGORIES.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + budgetFor(c,m), 0), 0)
+  const totalA = CATEGORIES.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (am[c]?.[m] ?? 0), 0), 0)
 
   if (loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
 
@@ -638,6 +684,7 @@ export function BudgetContent() {
           <p className="text-sm text-slate-500 mt-0.5">THBベース・セルをクリックして直接編集 / 1THB = {rate}円</p>
         </div>
         <div className="flex items-center gap-2">
+          <Link href="/budget-master" className="text-xs px-2.5 py-1.5 rounded border hover:bg-slate-50 text-slate-600 shrink-0">内訳マスタを管理</Link>
           <Select value={String(year)} onValueChange={v => setYear(Number(v))}>
             <SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger>
             <SelectContent>
@@ -672,8 +719,8 @@ export function BudgetContent() {
         <CardContent>
           <div className="grid grid-cols-12 gap-1.5">
             {MONTHS.map(m => {
-              const b = categories.reduce((s,c) => s + (bm[c]?.[m] ?? 0), 0)
-              const a = categories.reduce((s,c) => s + (am[c]?.[m] ?? 0), 0)
+              const b = CATEGORIES.reduce((s,c) => s + budgetFor(c,m), 0)
+              const a = CATEGORIES.reduce((s,c) => s + (am[c]?.[m] ?? 0), 0)
               const pct = b > 0 ? Math.min(a/b*100, 100) : 0
               const isOver = a > b && b > 0
               const isSel = m === selMonth
@@ -704,35 +751,55 @@ export function BudgetContent() {
           </div>
         </CardHeader>
         <CardContent>
-          {categories.length === 0 ? (
-            <p className="text-sm text-slate-400 text-center py-8">この月の予算データがありません</p>
-          ) : (
-            <table className="w-full text-sm">
-              <thead><tr className="border-b">
-                <th className="text-left py-2 pr-4 text-xs font-medium text-slate-500">カテゴリ</th>
-                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">予算（THB）</th>
-                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">実績（THB）</th>
-                <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">差異（THB）</th>
-                <th className="text-right py-2 pl-3 text-xs font-medium text-slate-500">消化率</th>
-              </tr></thead>
-              <tbody>
-                {categories.map(cat => {
-                  const b = bm[cat]?.[selMonth] ?? 0
-                  const a = am[cat]?.[selMonth] ?? 0
-                  const v = a - b
-                  const rateVal = b > 0 ? Math.round(a/b*100) : null
-                  return (
-                    <tr key={cat} className="border-b hover:bg-slate-50">
-                      <td className="py-3 pr-4 font-medium text-sm">{cat}</td>
-                      <td className="py-3 px-3 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <span className="text-xs text-slate-400">฿</span>
-                          <input type="number" value={b === 0 ? '' : Math.round(b)}
-                            onChange={e => updateCell(cat, selMonth, e.target.value)}
-                            placeholder="0"
-                            className="w-28 text-right text-sm bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
+          <table className="w-full text-sm">
+            <thead><tr className="border-b">
+              <th className="text-left py-2 pr-4 text-xs font-medium text-slate-500">カテゴリ</th>
+              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">予算（THB）</th>
+              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">実績（THB）</th>
+              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">差異（THB）</th>
+              <th className="text-right py-2 pl-3 text-xs font-medium text-slate-500">消化率</th>
+            </tr></thead>
+            <tbody>
+              {CATEGORIES.map(cat => {
+                const b = budgetFor(cat, selMonth)
+                const a = am[cat]?.[selMonth] ?? 0
+                const v = a - b
+                const rateVal = b > 0 ? Math.round(a/b*100) : null
+                const items = lineItems[cat] ?? []
+                const expandable = items.length > 0
+                const isOpen = expanded.has(cat)
+                return (
+                  <Fragment key={cat}>
+                    <tr className="border-b hover:bg-slate-50">
+                      <td className="py-3 pr-4 font-medium text-sm">
+                        <div className="flex items-center gap-1.5">
+                          {expandable && (
+                            <button type="button" onClick={() => toggleExpand(cat)} className="text-slate-400 hover:text-slate-700 w-3">
+                              {isOpen ? '▾' : '▸'}
+                            </button>
+                          )}
+                          <span>{cat}</span>
+                          {expandable && <span className="text-[10px] text-slate-400">（内訳{items.length}件）</span>}
                         </div>
-                        {b > 0 && <p className="text-[10px] text-slate-400 text-right">¥{Math.round(b*rate).toLocaleString()}</p>}
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        {expandable ? (
+                          <div>
+                            <p className="text-sm">฿{Math.round(b).toLocaleString()}</p>
+                            <p className="text-[10px] text-slate-400">内訳合計・¥{Math.round(b*rate).toLocaleString()}</p>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-end gap-1">
+                              <span className="text-xs text-slate-400">฿</span>
+                              <input type="number" value={b === 0 ? '' : Math.round(b)}
+                                onChange={e => updateCell(cat, selMonth, e.target.value)}
+                                placeholder="0"
+                                className="w-28 text-right text-sm bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
+                            </div>
+                            {b > 0 && <p className="text-[10px] text-slate-400 text-right">¥{Math.round(b*rate).toLocaleString()}</p>}
+                          </>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-right text-sm">
                         {a > 0 ? <div><p>฿{Math.round(a).toLocaleString()}</p><p className="text-[10px] text-slate-400">¥{Math.round(a*rate).toLocaleString()}</p></div> : '—'}
@@ -751,43 +818,148 @@ export function BudgetContent() {
                         ) : <span className="text-xs text-slate-400">—</span>}
                       </td>
                     </tr>
-                  )
-                })}
-                {/* 合計行 */}
-                {(() => {
-                  const tb = categories.reduce((s,c) => s + (bm[c]?.[selMonth] ?? 0), 0)
-                  const ta = categories.reduce((s,c) => s + (am[c]?.[selMonth] ?? 0), 0)
-                  return (
-                    <tr className="border-t-2 bg-slate-50">
-                      <td className="py-3 pr-4 font-bold text-sm">合計</td>
-                      <td className="py-3 px-3 text-right font-bold text-sm">
-                        <p>฿{Math.round(tb).toLocaleString()}</p>
-                        <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(tb*rate).toLocaleString()}</p>
-                      </td>
-                      <td className="py-3 px-3 text-right font-bold text-sm">
-                        <p>฿{Math.round(ta).toLocaleString()}</p>
-                        <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(ta*rate).toLocaleString()}</p>
-                      </td>
-                      <td className={`py-3 px-3 text-right font-bold text-sm ${pctColor(ta,tb)}`}>
-                        <p>{tb===0?'—':(ta-tb>0?'+':'')+'฿'+Math.round(ta-tb).toLocaleString()}</p>
-                        <p className="text-[10px] font-normal">{tb===0?'':((ta-tb>0?'+':'')+'¥'+Math.round((ta-tb)*rate).toLocaleString())}</p>
-                      </td>
-                      <td className="py-3 pl-3 text-right">
-                        {tb > 0 && <span className={`text-xs font-bold ${pctColor(ta,tb)}`}>{Math.round(ta/tb*100)}%</span>}
-                      </td>
-                    </tr>
-                  )
-                })()}
-              </tbody>
-            </table>
-          )}
-          <p className="text-xs text-slate-400 mt-3">予算額（THB）を入力→「保存する」で確定。為替: 1THB = {rate}円（設定画面で変更可）</p>
+                    {expandable && isOpen && items.map(li => {
+                      const liVal = lineAmounts[li.id]?.[selMonth] ?? 0
+                      return (
+                        <tr key={li.id} className="border-b bg-slate-50/60">
+                          <td className="py-2 pr-4 pl-8 text-xs text-slate-500">└ {li.label}</td>
+                          <td className="py-2 px-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <span className="text-[10px] text-slate-400">฿</span>
+                              <input type="number" value={liVal === 0 ? '' : Math.round(liVal)}
+                                onChange={e => updateLineCell(li.id, selMonth, e.target.value)}
+                                placeholder="0"
+                                className="w-24 text-right text-xs bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
+                            </div>
+                          </td>
+                          <td colSpan={3}></td>
+                        </tr>
+                      )
+                    })}
+                  </Fragment>
+                )
+              })}
+              {/* 合計行 */}
+              {(() => {
+                const tb = CATEGORIES.reduce((s,c) => s + budgetFor(c,selMonth), 0)
+                const ta = CATEGORIES.reduce((s,c) => s + (am[c]?.[selMonth] ?? 0), 0)
+                return (
+                  <tr className="border-t-2 bg-slate-50">
+                    <td className="py-3 pr-4 font-bold text-sm">合計</td>
+                    <td className="py-3 px-3 text-right font-bold text-sm">
+                      <p>฿{Math.round(tb).toLocaleString()}</p>
+                      <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(tb*rate).toLocaleString()}</p>
+                    </td>
+                    <td className="py-3 px-3 text-right font-bold text-sm">
+                      <p>฿{Math.round(ta).toLocaleString()}</p>
+                      <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(ta*rate).toLocaleString()}</p>
+                    </td>
+                    <td className={`py-3 px-3 text-right font-bold text-sm ${pctColor(ta,tb)}`}>
+                      <p>{tb===0?'—':(ta-tb>0?'+':'')+'฿'+Math.round(ta-tb).toLocaleString()}</p>
+                      <p className="text-[10px] font-normal">{tb===0?'':((ta-tb>0?'+':'')+'¥'+Math.round((ta-tb)*rate).toLocaleString())}</p>
+                    </td>
+                    <td className="py-3 pl-3 text-right">
+                      {tb > 0 && <span className={`text-xs font-bold ${pctColor(ta,tb)}`}>{Math.round(ta/tb*100)}%</span>}
+                    </td>
+                  </tr>
+                )
+              })()}
+            </tbody>
+          </table>
+          <p className="text-xs text-slate-400 mt-3">予算額（THB）を入力→「保存する」で確定。為替: 1THB = {rate}円（設定画面で変更可）。内訳（▸）が設定されているカテゴリは内訳の金額を入力すると自動で合計されます。</p>
         </CardContent>
       </Card>
     </div>
   )
 }
-    
+
+export function BudgetMasterPage() {
+  const supabase = createBrowserClient()
+  const [items, setItems] = useState<BudgetLineItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [newLabel, setNewLabel] = useState<Record<string,string>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    const { data } = await supabase.from('budget_line_items').select('*').order('category').order('sort_order')
+    setItems(data ?? [])
+    setLoading(false)
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const byCategory = (cat: string) => items.filter(i => i.category === cat)
+
+  async function addItem(cat: string) {
+    const label = (newLabel[cat] ?? '').trim()
+    if (!label) return
+    const current = byCategory(cat)
+    if (current.length >= 10) return
+    setBusy(cat)
+    await supabase.from('budget_line_items').insert({ category: cat, label, sort_order: current.length })
+    setNewLabel(f => ({ ...f, [cat]: '' }))
+    setBusy(null); load()
+  }
+
+  async function removeItem(id: string) {
+    if (!confirm('この内訳項目を削除しますか？入力済みの月次金額も削除されます。')) return
+    await supabase.from('budget_line_items').delete().eq('id', id)
+    load()
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
+
+  return (
+    <div className="p-6 space-y-5 max-w-3xl">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">予算内訳マスタ</h1>
+          <p className="text-sm text-slate-500 mt-0.5">各カテゴリを最大10件まで内訳（明細）に分割できます。予算管理画面で内訳ごとに月次金額を入力すると、合計がそのカテゴリの予算として表示されます。</p>
+        </div>
+        <Link href="/budget" className="text-xs px-2.5 py-1.5 rounded border hover:bg-slate-50 text-slate-600 shrink-0">← 予算管理に戻る</Link>
+      </div>
+      <div className="space-y-3">
+        {CATEGORIES.map(cat => {
+          const list = byCategory(cat)
+          const full = list.length >= 10
+          return (
+            <Card key={cat}>
+              <CardContent className="pt-4 pb-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold">{cat}</p>
+                  <span className="text-xs text-slate-400">{list.length}/10件</span>
+                </div>
+                {list.length > 0 && (
+                  <div className="space-y-1">
+                    {list.map(li => (
+                      <div key={li.id} className="flex items-center justify-between text-sm px-3 py-1.5 rounded bg-slate-50">
+                        <span>{li.label}</span>
+                        <button onClick={() => removeItem(li.id)} className="text-xs text-red-500 hover:text-red-700">削除</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!full ? (
+                  <div className="flex gap-2 pt-1">
+                    <Input value={newLabel[cat] ?? ''} onChange={e => setNewLabel(f => ({ ...f, [cat]: e.target.value }))}
+                      placeholder="内訳名（例: オフィス家賃）" className="h-8 text-sm flex-1"
+                      onKeyDown={e => { if (e.key === 'Enter') addItem(cat) }} />
+                    <Button size="sm" variant="outline" className="h-8" onClick={() => addItem(cat)} disabled={busy===cat || !(newLabel[cat]??'').trim()}>
+                      <Plus size={13} className="mr-1"/>追加
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-400 pt-1">上限（10件）に達しています</p>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const STATUS_MAP = {
   draft:{label:'草稿',cls:'bg-amber-100 text-amber-800'},
   reviewing:{label:'確認中',cls:'bg-blue-100 text-blue-800'},
