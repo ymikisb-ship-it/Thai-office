@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase/client'
-import { LayoutDashboard, Receipt, Users, BarChart3, FileText, LogOut, Menu, X, Plus, Banknote, Wallet, Calendar, ShieldCheck } from 'lucide-react'
+import { LayoutDashboard, Receipt, Users, BarChart3, FileText, LogOut, Menu, X, Plus, Banknote, Wallet, Calendar, ShieldCheck, Setting } from 'lucide-react'
 import type { AppUser } from '@/lib/supabase/types'
 
 const NAV = [
@@ -15,6 +15,7 @@ const NAV = [
   { href:'/tax',         label:'税務カレンダー', icon:Calendar },
   { href:'/visa',        label:'ビザ・WP管理',  icon:ShieldCheck },
   { href:'/reports',     label:'月次レポート',   icon:FileText },
+  { href:'/settings', label:'設定', icon:Settings },
 ]
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
