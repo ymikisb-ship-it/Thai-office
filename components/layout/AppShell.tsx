@@ -7,7 +7,7 @@ import { LayoutDashboard, Receipt, Users, BarChart3, FileText, LogOut, Menu, X, 
 import type { AppUser } from '@/lib/supabase/types'
 
 const NAV = [
-  { href:'/',            label:'ダッシュボード', icon:LayoutDashboard },
+  { href:'/expenses',            label:'ダッシュボード', icon:LayoutDashboard },
   { href:'/expenses',    label:'経費管理',       icon:Receipt },
   { href:'/activities',  label:'活動管理',       icon:Users },
   { href:'/budget',      label:'予算管理',       icon:BarChart3 },
