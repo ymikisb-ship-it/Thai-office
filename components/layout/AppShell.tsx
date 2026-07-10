@@ -39,40 +39,41 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   const SideNav = () => (
     <nav className="flex flex-col h-full">
-      <div className="flex items-center gap-3 px-4 py-4 border-b border-slate-100">
-        <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
-          <span className="text-white text-sm font-bold">T</span>
+      <div className="flex items-center gap-3 px-4 py-4 border-b border-slate-800">
+        <div className="w-9 h-9 rounded-lg bg-white flex items-center justify-center shrink-0 p-1 overflow-hidden">
+          {/* TODO: /public/logo-mark.png（またはsvg）にSynergy & Brightenのロゴマーク（文字なし）を配置してください */}
+          <img src="/logo-mark.png" alt="Synergy & Brighten" className="w-full h-full object-contain" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-slate-900">タイ駐在員事務所</p>
-          <p className="text-xs text-slate-500">管理システム</p>
+          <p className="text-sm font-semibold text-white">タイ駐在員事務所</p>
+          <p className="text-xs text-slate-400">管理システム</p>
         </div>
       </div>
       <div className="flex-1 py-2 px-2 space-y-0.5 overflow-y-auto">
         {NAV.map(({ href, label, icon: Icon }) => (
           <Link key={href} href={href} onClick={() => setMobileOpen(false)}
             className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
-              isActive(href) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              isActive(href) ? 'bg-blue-600 text-white font-medium' : 'text-slate-300 hover:text-white hover:bg-white/10'
             }`}>
             <Icon size={15} className="shrink-0" />{label}
           </Link>
         ))}
       </div>
-      <div className="p-3 border-t border-slate-100 space-y-1">
+      <div className="p-3 border-t border-slate-800 space-y-1">
         {profile && (
           <div className="flex items-center gap-2 px-3 py-2 mb-1">
-            <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-              <span className="text-xs font-semibold text-blue-700">{profile.name[0]}</span>
+            <div className="w-7 h-7 rounded-full bg-blue-500/20 flex items-center justify-center shrink-0">
+              <span className="text-xs font-semibold text-blue-300">{profile.name[0]}</span>
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-medium text-slate-900 truncate">{profile.name}</p>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${profile.role==='sales'?'bg-blue-100 text-blue-700':'bg-purple-100 text-purple-700'}`}>
+              <p className="text-xs font-medium text-white truncate">{profile.name}</p>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${profile.role==='sales'?'bg-blue-500/20 text-blue-300':'bg-purple-500/20 text-purple-300'}`}>
                 {profile.role==='sales'?'営業':'総務'}
               </span>
             </div>
           </div>
         )}
-        <button onClick={logout} className="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-lg text-sm text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors">
+        <button onClick={logout} className="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-white/10 transition-colors">
           <LogOut size={16} className="shrink-0" />ログアウト
         </button>
       </div>
@@ -81,14 +82,14 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-screen bg-slate-50">
-      <aside className="hidden md:flex flex-col w-56 bg-white border-r border-slate-200 shrink-0">
+      <aside className="hidden md:flex flex-col w-56 bg-slate-900 border-r border-slate-800 shrink-0">
         <SideNav />
       </aside>
       {mobileOpen && (
         <div className="fixed inset-0 z-50 md:hidden">
           <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute left-0 top-0 bottom-0 w-64 bg-white shadow-xl">
-            <button onClick={() => setMobileOpen(false)} className="absolute right-3 top-3 p-1.5 rounded-md hover:bg-slate-100"><X size={18} /></button>
+          <aside className="absolute left-0 top-0 bottom-0 w-64 bg-slate-900 shadow-xl">
+            <button onClick={() => setMobileOpen(false)} className="absolute right-3 top-3 p-1.5 rounded-md text-white hover:bg-white/10"><X size={18} /></button>
             <SideNav />
           </aside>
         </div>
