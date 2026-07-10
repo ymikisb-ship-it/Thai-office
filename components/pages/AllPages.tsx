@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Plus, Download, Paperclip, Sparkles, FileText, Check } from 'lucide-react'
 import { CATEGORIES, PAYMENT_METHODS, ACTIVITY_TYPES, RATE } from '@/lib/utils'
+import { createWorker, type Worker as TesseractWorker } from 'tesseract.js'
 import type { Expense, Activity, Budget, MonthlyReport, ExpenseCategory, PaymentMethod, ActivityType } from '@/lib/supabase/types'
 
 // ─── 共通 ─────────────────────────────────────────────────────
@@ -33,6 +34,70 @@ const CAT_COLOR: Record<string,string> = {
 const TYPE_COLOR: Record<string,string> = {
   '訪問':'bg-blue-50 text-blue-700','WEB会議':'bg-teal-50 text-teal-700',
   '出張':'bg-amber-50 text-amber-700','電話':'bg-purple-50 text-purple-700','その他':'bg-slate-100 text-slate-600'
+}
+
+// ─── レシートOCR（ブラウザ完結・Tesseract.js／APIキー不要） ──────────
+let _ocrWorkerPromise: Promise<TesseractWorker> | null = null
+function getOcrWorker() {
+  if (!_ocrWorkerPromise) _ocrWorkerPromise = createWorker(['eng', 'tha'])
+  return _ocrWorkerPromise
+}
+
+type ParsedReceipt = {
+  vendor: string | null
+  amount_thb: number | null
+  expense_date: string | null
+  category: ExpenseCategory | null
+  confidence: number
+  rawText: string
+}
+
+function parseReceiptText(rawText: string, confidence: number): ParsedReceipt {
+  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean)
+  const vendor = lines[0] ? lines[0].slice(0, 30) : null
+
+  // 金額：「รวม/ยอดรวม/Total」等の行を優先、なければ本文中の最大の金額らしき数値
+  const totalKeywords = /รวม|ยอดรวม|สุทธิ|total|grand\s*total|net\s*amount/i
+  let amount: number | null = null
+  for (const line of lines) {
+    if (totalKeywords.test(line)) {
+      const nums = line.replace(/,/g, '').match(/\d+(\.\d{1,2})?/g)
+      if (nums && nums.length) { amount = parseFloat(nums[nums.length - 1]); break }
+    }
+  }
+  if (amount == null) {
+    const nums = (rawText.match(/\d{1,3}(,\d{3})*(\.\d{1,2})?/g) || [])
+      .map(s => parseFloat(s.replace(/,/g, '')))
+      .filter(n => !isNaN(n) && n > 0 && n < 1000000)
+    if (nums.length) amount = Math.max(...nums)
+  }
+
+  // 日付：dd/mm/yyyy 等（タイの仏暦=西暦+543の場合は西暦に変換）、なければ yyyy-mm-dd
+  let expense_date: string | null = null
+  const dmy = rawText.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/)
+  if (dmy) {
+    const [, d, m, yRaw] = dmy
+    let year = parseInt(yRaw.length === 2 ? '20' + yRaw : yRaw)
+    if (year > 2400) year -= 543
+    if (year > 2000 && year < 2100) expense_date = `${year}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+  }
+  if (!expense_date) {
+    const iso = rawText.match(/(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/)
+    if (iso) { const [, y, m, d] = iso; expense_date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}` }
+  }
+
+  // カテゴリ：キーワードによる簡易推定（OCRは意味理解ができないため参考程度）
+  const catRules: [RegExp, ExpenseCategory][] = [
+    [/taxi|แท็กซี่|grab|เชื้อเพลิง|fuel|ปั๊มน้ำมัน|parking|bts|mrt|จอดรถ/i, '交通費'],
+    [/hotel|โรงแรม|airline|สายการบิน|airport|สนามบิน/i, '出張費'],
+    [/restaurant|ร้านอาหาร|cafe|coffee|ภัตตาคาร|food/i, '接待交際費'],
+    [/office|เครื่องเขียน|stationery|store|mart|เซเว่น|7-eleven/i, '備品'],
+    [/phone|internet|true|ais|dtac|mobile/i, '通信費'],
+  ]
+  let category: ExpenseCategory | null = null
+  for (const [re, cat] of catRules) { if (re.test(rawText)) { category = cat; break } }
+
+  return { vendor, amount_thb: amount, expense_date, category, confidence, rawText }
 }
 
 // ─── ダッシュボード ────────────────────────────────────────────
@@ -158,6 +223,12 @@ export function ExpensesContent() {
   const [showNew,setShowNew]=useState(false); const [editTarget,setEditTarget]=useState<Expense|null>(null)
   const [newForm,setNewForm]=useState({date:now.toISOString().slice(0,10),category:'交通費' as ExpenseCategory,payment:'現金' as PaymentMethod,amount:'',memo:''})
   const [saving,setSaving]=useState(false)
+  // ── レシートOCR関連 ──
+  const [receiptFile,setReceiptFile]=useState<File|null>(null)
+  const [receiptPreview,setReceiptPreview]=useState<string|null>(null)
+  const [ocrLoading,setOcrLoading]=useState(false)
+  const [ocrWarning,setOcrWarning]=useState<string|null>(null)
+  const [ocrRaw,setOcrRaw]=useState<Record<string,unknown>|null>(null)
 
   const load=useCallback(async()=>{
     setLoading(true)
@@ -176,16 +247,63 @@ export function ExpensesContent() {
   function exportCSV() {
     const h='日付,カテゴリ,THB,円,支払方法,備考'
     const lines=filtered.map(e=>`${e.expense_date},${e.category},${e.amount_thb},${e.amount_jpy},${e.payment_method},"${(e.memo??'').replace(/"/g,'""')}"`)
-    const b=new Blob(['\uFEFF'+[h,...lines].join('\n')],{type:'text/csv;charset=utf-8;'})
+    const b=new Blob(['﻿'+[h,...lines].join('\n')],{type:'text/csv;charset=utf-8;'})
     const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`経費_${year}-${month}.csv`; a.click()
+  }
+
+  function resetReceipt() {
+    setReceiptFile(null); setReceiptPreview(null); setOcrWarning(null); setOcrRaw(null)
+  }
+
+  async function handleReceiptSelect(file: File | null) {
+    if (!file) return
+    setReceiptFile(file)
+    setOcrWarning(null)
+    const previewUrl = URL.createObjectURL(file)
+    setReceiptPreview(previewUrl)
+    setOcrLoading(true)
+    try {
+      const worker = await getOcrWorker()
+      const { data } = await worker.recognize(file)
+      const parsed = parseReceiptText(data.text, data.confidence)
+      setNewForm(f => ({
+        ...f,
+        date: parsed.expense_date ?? f.date,
+        category: parsed.category ?? f.category,
+        amount: parsed.amount_thb != null ? String(parsed.amount_thb) : f.amount,
+        memo: parsed.vendor ?? f.memo,
+      }))
+      setOcrRaw(parsed as unknown as Record<string, unknown>)
+      if (parsed.confidence < 60 || parsed.amount_thb == null) {
+        setOcrWarning('レシートの読み取り精度が低いようです。内容を必ずご確認・修正してください。')
+      }
+    } catch {
+      setOcrWarning('レシートの読み取り中にエラーが発生しました。手入力してください。')
+    } finally {
+      setOcrLoading(false)
+    }
   }
 
   async function saveNew() {
     if(!newForm.amount) return; setSaving(true)
     const {data:{user}}=await supabase.auth.getUser()
     const thb=parseFloat(newForm.amount)
-    if(user) await supabase.from('expenses').insert({user_id:user.id,expense_date:newForm.date,category:newForm.category,amount_thb:thb,amount_jpy:Math.round(thb*RATE),exchange_rate:RATE,payment_method:newForm.payment,memo:newForm.memo||null})
-    setSaving(false); setShowNew(false); setNewForm(f=>({...f,amount:'',memo:''})); load()
+    let receiptUrl: string | null = null
+    if (user && receiptFile) {
+      const path = `${user.id}/${Date.now()}-${receiptFile.name}`
+      const { error: upErr } = await supabase.storage.from('receipts').upload(path, receiptFile)
+      if (!upErr) {
+        const { data: pub } = supabase.storage.from('receipts').getPublicUrl(path)
+        receiptUrl = pub.publicUrl
+      }
+      // アップロードに失敗しても経費データ自体の保存は継続する（レシート画像は任意項目）
+    }
+    if(user) await supabase.from('expenses').insert({
+      user_id:user.id,expense_date:newForm.date,category:newForm.category,amount_thb:thb,
+      amount_jpy:Math.round(thb*RATE),exchange_rate:RATE,payment_method:newForm.payment,memo:newForm.memo||null,
+      receipt_url:receiptUrl,ocr_raw:ocrRaw,
+    })
+    setSaving(false); setShowNew(false); setNewForm(f=>({...f,amount:'',memo:''})); resetReceipt(); load()
   }
 
   return (
@@ -195,12 +313,40 @@ export function ExpensesContent() {
           <p className="text-sm text-slate-500 mt-0.5">{year}年{month}月 — {filtered.length}件</p></div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={exportCSV} disabled={!filtered.length}><Download size={13} className="mr-1"/>CSV</Button>
-          <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'経費を追加'}</Button>
+          <Button size="sm" onClick={()=>{setShowNew(v=>!v); if(showNew) resetReceipt()}}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'経費を追加'}</Button>
         </div>
       </div>
       {showNew && (
         <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
           <p className="text-sm font-semibold">新規経費入力</p>
+
+          {/* レシート写真アップロード（OCR自動入力） */}
+          <div className="rounded-lg border border-dashed border-blue-300 bg-white p-3">
+            <div className="flex items-center gap-3">
+              {receiptPreview ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={receiptPreview} alt="レシート" className="w-14 h-14 object-cover rounded border" />
+              ) : (
+                <div className="w-14 h-14 rounded border border-slate-200 flex items-center justify-center text-slate-300"><Paperclip size={20}/></div>
+              )}
+              <div className="flex-1 min-w-0">
+                <label className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 cursor-pointer hover:underline">
+                  <Paperclip size={13}/>
+                  {receiptFile ? '別のレシートを選び直す' : 'レシート写真を選択（自動入力）'}
+                  <input type="file" accept="image/*" capture="environment" className="hidden"
+                    onChange={e=>handleReceiptSelect(e.target.files?.[0] ?? null)} />
+                </label>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {ocrLoading ? '解析中...（初回はOCRエンジンの読み込みで時間がかかることがあります）' : receiptFile ? '内容を自動入力しました。読み取り精度は高くないため、必ず下記を確認・修正してください。' : '写真を選ぶと日付・金額・カテゴリを自動入力します（ブラウザ内で処理・APIキー不要／任意項目）'}
+                </p>
+              </div>
+              {receiptFile && !ocrLoading && (
+                <button type="button" onClick={resetReceipt} className="text-xs text-slate-400 hover:text-slate-600">クリア</button>
+              )}
+            </div>
+            {ocrWarning && <p className="text-[11px] text-amber-600 mt-2">⚠ {ocrWarning}</p>}
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1"><Label className="text-xs text-slate-500">日付</Label>
               <Input type="date" value={newForm.date} onChange={e=>setNewForm(f=>({...f,date:e.target.value}))} className="h-8 text-sm"/></div>
@@ -220,7 +366,7 @@ export function ExpensesContent() {
             </Select>
           </div>
           <Input placeholder="備考（任意）" value={newForm.memo} onChange={e=>setNewForm(f=>({...f,memo:e.target.value}))} className="h-8 text-sm"/>
-          <Button size="sm" onClick={saveNew} disabled={saving||!newForm.amount} className="w-full">{saving?'保存中...':'経費を保存'}</Button>
+          <Button size="sm" onClick={saveNew} disabled={saving||!newForm.amount||ocrLoading} className="w-full">{saving?'保存中...':'経費を保存'}</Button>
         </CardContent></Card>
       )}
       <div className="grid grid-cols-3 gap-3">
@@ -642,6 +788,12 @@ export function BudgetContent() {
   )
 }
     
+const STATUS_MAP = {
+  draft:{label:'草稿',cls:'bg-amber-100 text-amber-800'},
+  reviewing:{label:'確認中',cls:'bg-blue-100 text-blue-800'},
+  finalized:{label:'確定',cls:'bg-green-100 text-green-800'},
+} as const
+
 export function ReportsContent() {
   const supabase = createBrowserClient()
   const now = new Date()
