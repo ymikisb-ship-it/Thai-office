@@ -1,3 +1,3 @@
-import { BudgetContent } from '@/components/pages/AllPages'
-export default function Page() { return <BudgetContent /> }
+import { BudgetPage } from '@/components/pages/BudgetPage'
+export default function Page() { return <BudgetPage /> }
 export const dynamic = 'force-dynamic'

@@ -1,3 +1,3 @@
-import { ExpensesContent } from '@/components/pages/AllPages'
-export default function Page() { return <ExpensesContent /> }
+import { ExpensesPage } from '@/components/pages/ExpensesPage'
+export default function Page() { return <ExpensesPage /> }
 export const dynamic = 'force-dynamic'

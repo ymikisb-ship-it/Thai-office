@@ -109,11 +109,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 function QuickInput() {
   const supabase = createBrowserClient()
   const [open, setOpen] = useState(false)
-  const [mode, setMode] = useState<'menu'|'activity'|'expense'>('menu')
+  const router = useRouter()
+  const [mode, setMode] = useState<'menu'|'activity'>('menu')
   const [saving, setSaving] = useState(false)
   const [aForm, setAForm] = useState({ type:'訪問', company:'', content:'' })
-  const [eForm, setEForm] = useState({ category:'交通費', payment:'現金', amount:'' })
-  const RATE = 4.2
 
   async function saveActivity() {
     setSaving(true)
@@ -124,18 +123,6 @@ function QuickInput() {
       content: aForm.content || null, is_business_trip: aForm.type === '出張'
     })
     setSaving(false); setOpen(false); setAForm({ type:'訪問', company:'', content:'' })
-  }
-
-  async function saveExpense() {
-    if (!eForm.amount) return; setSaving(true)
-    const { data: { user } } = await supabase.auth.getUser()
-    const thb = parseFloat(eForm.amount)
-    if (user) await supabase.from('expenses').insert({
-      user_id: user.id, expense_date: new Date().toISOString().slice(0,10),
-      category: eForm.category, amount_thb: thb, amount_jpy: Math.round(thb * RATE),
-      exchange_rate: RATE, payment_method: eForm.payment
-    })
-    setSaving(false); setOpen(false); setEForm(f => ({ ...f, amount:'' }))
   }
 
   return (
@@ -150,9 +137,9 @@ function QuickInput() {
                 <Users size={18} className="text-blue-500 shrink-0" />
                 <div><p className="text-sm font-medium">活動を記録</p><p className="text-xs text-slate-500">訪問・会議・出張など</p></div>
               </button>
-              <button onClick={() => setMode('expense')} className="flex items-center gap-3 w-full p-3 rounded-xl border hover:bg-slate-50 text-left">
+              <button onClick={() => { setOpen(false); router.push('/expenses') }} className="flex items-center gap-3 w-full p-3 rounded-xl border hover:bg-slate-50 text-left">
                 <Banknote size={18} className="text-green-500 shrink-0" />
-                <div><p className="text-sm font-medium">経費を入力</p><p className="text-xs text-slate-500">THBで入力・JPY自動換算</p></div>
+                <div><p className="text-sm font-medium">領収書を取り込む</p><p className="text-xs text-slate-500">撮影・画像・PDFから自動入力（経費管理へ）</p></div>
               </button>
             </div>
           )}
@@ -167,32 +154,6 @@ function QuickInput() {
               <div className="flex gap-2">
                 <button onClick={() => setMode('menu')} className="flex-1 py-2 text-sm border rounded-lg hover:bg-slate-50">戻る</button>
                 <button onClick={saveActivity} disabled={saving} className="flex-1 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '記録する'}</button>
-              </div>
-            </div>
-          )}
-          {mode === 'expense' && (
-            <div className="space-y-3">
-              <p className="text-xs font-medium text-slate-500">経費入力（THBベース）</p>
-              <div className="grid grid-cols-2 gap-2">
-                <select value={eForm.category} onChange={e => setEForm(f => ({ ...f, category:e.target.value }))} className="border rounded-lg px-2 py-2 text-xs bg-white">
-                  {['給与','家賃','通信費','交通費','接待交際費','出張費','備品','その他'].map(c => <option key={c}>{c}</option>)}
-                </select>
-                <select value={eForm.payment} onChange={e => setEForm(f => ({ ...f, payment:e.target.value }))} className="border rounded-lg px-2 py-2 text-xs bg-white">
-                  {['現金','法人カード','個人立替'].map(p => <option key={p}>{p}</option>)}
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-400 font-medium">฿</span>
-                <input type="number" className="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="金額（THB）" value={eForm.amount} onChange={e => setEForm(f => ({ ...f, amount:e.target.value }))} />
-              </div>
-              {eForm.amount && (
-                <div className="bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-700">
-                  ฿{parseFloat(eForm.amount).toLocaleString()} ≈ ¥{Math.round(parseFloat(eForm.amount)*RATE).toLocaleString()}
-                </div>
-              )}
-              <div className="flex gap-2">
-                <button onClick={() => setMode('menu')} className="flex-1 py-2 text-sm border rounded-lg hover:bg-slate-50">戻る</button>
-                <button onClick={saveExpense} disabled={saving || !eForm.amount} className="flex-1 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '記録する'}</button>
               </div>
             </div>
           )}

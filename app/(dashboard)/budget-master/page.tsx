@@ -1,3 +1,3 @@
-import { BudgetMasterPage } from '@/components/pages/AllPages'
-export default function Page() { return <BudgetMasterPage /> }
+import { redirect } from 'next/navigation'
+export default function Page() { redirect('/budget') }
 export const dynamic = 'force-dynamic'
