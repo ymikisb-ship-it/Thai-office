@@ -56,6 +56,8 @@ export function ExpensesPage(_props: Props = {}) {
   const [userId, setUserId] = useState<string | null>(null)
   const [userName, setUserName] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
+  const [members, setMembers] = useState<{ id: string; name: string }[]>([])
+  const [applicantId, setApplicantId] = useState<string>('')
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -83,7 +85,10 @@ export function ExpensesPage(_props: Props = {}) {
         setUserId(user.id)
         const { data: p } = await supabase.from('users').select('name,role').eq('id', user.id).single()
         setUserName(p?.name ?? ''); setIsAdmin(p?.role === 'admin')
+        setApplicantId(user.id)
       }
+      const { data: us } = await supabase.from('users').select('id,name').order('name')
+      setMembers(us ?? [])
       const { data: s } = await supabase.from('settings').select('value').eq('key', 'exchange_rate').maybeSingle()
       const r = s ? parseFloat(s.value) : NaN
       if (isFinite(r) && r > 0) setJpyRate(r)
@@ -228,12 +233,12 @@ export function ExpensesPage(_props: Props = {}) {
     const item = itemMap.get(f.itemCode)!
     const isThb = f.currency === 'THB'
     const { error } = await supabase.from('expenses').insert({
-      user_id: userId, expense_date: f.date, category: item.category_name, item_code: item.code,
+      user_id: applicantId || userId, expense_date: f.date, category: item.category_name, item_code: item.code,
       amount_thb: thb, amount_jpy: Math.round(thb * jpyRate), exchange_rate: jpyRate,
       currency: f.currency, foreign_amount: isThb ? null : parseFloat(f.amount), fx_rate: isThb ? null : parseFloat(f.fxRate),
       vendor: f.vendor.trim() || null, description: f.description.trim() || null, payment_date: f.paymentDate || null,
       payment_method: f.paymentMethod, payment_status: f.paymentStatus, has_receipt: !!receiptPath, receipt_no: f.receiptNo.trim() || null,
-      advanced_by: f.paymentMethod === '個人立替' ? userName || null : null, receipt_path: receiptPath, memo: f.memo.trim() || null,
+      advanced_by: f.paymentMethod === '個人立替' ? (members.find(m => m.id === (applicantId || userId))?.name || userName || null) : null, receipt_path: receiptPath, memo: f.memo.trim() || null,
       ocr_raw: d.rawText ? { text: d.rawText.slice(0, 4000), confidence: d.confidence, suggestions: d.suggestions } : null,
     })
     if (error) {
@@ -253,7 +258,7 @@ export function ExpensesPage(_props: Props = {}) {
   const [editErr, setEditErr] = useState<string | null>(null)
   const [editSaving, setEditSaving] = useState(false)
   function openEdit(e: ExpenseRecord) {
-    if (!isAdmin && e.user_id !== userId) { flash('err', '他のユーザーが登録した経費は編集できません（管理者のみ可能）'); return }
+    if (!isAdmin) { flash('err', '登録済みの経費の修正・削除は管理者のみ可能です'); return }
     setEdit(e); setEditErr(null)
     setEditForm({
       date: e.expense_date, vendor: e.vendor ?? '', itemCode: e.item_code ?? '', amount: String(e.currency === 'THB' ? e.amount_thb : (e.foreign_amount ?? '')),
@@ -374,7 +379,12 @@ export function ExpensesPage(_props: Props = {}) {
           <h1 className="text-xl font-bold text-slate-900">経費管理</h1>
           <p className="text-sm text-slate-500 mt-0.5">{year}年{month}月 — {expenses.length}件　領収書は撮影・画像・PDFから自動入力できます</p>
         </div>
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-2 flex-wrap items-center">
+          <label className="flex items-center gap-1 text-xs text-slate-500">申請者
+            <select value={applicantId} onChange={e => setApplicantId(e.target.value)} className="h-8 rounded-md border border-input bg-white px-2 text-sm text-slate-900" aria-label="申請者（代理申請の場合は変更）">
+              {members.map(m => <option key={m.id} value={m.id}>{m.name}{m.id === userId ? '（自分）' : ''}</option>)}
+            </select>
+          </label>
           <input ref={camRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
           <input ref={fileRef} type="file" accept="image/*,application/pdf" multiple className="hidden" onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
           <Button size="sm" onClick={() => camRef.current?.click()}><Camera size={14} className="mr-1" />撮影</Button>
