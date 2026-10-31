@@ -1,9 +1,11 @@
 'use client'
 import { useState } from 'react'
 import { createBrowserClient } from '@/lib/supabase/client'
+import { useI18n, LangSwitcher } from '@/lib/i18n'
 
 export default function LoginPage() {
   const supabase = createBrowserClient()
+  const { t } = useI18n()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -17,7 +19,7 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
 
     if (error) {
-      setError('メールアドレスまたはパスワードが正しくありません')
+      setError(t('メールアドレスまたはパスワードが正しくありません'))
       setLoading(false)
       return
     }
@@ -32,6 +34,7 @@ export default function LoginPage() {
       justifyContent: 'center', background: '#f8fafc', padding: '16px'
     }}>
       <div style={{ width: '100%', maxWidth: '360px' }}>
+        <div style={{ textAlign: 'right', marginBottom: '8px' }}><LangSwitcher /></div>
         <div style={{ textAlign: 'center', marginBottom: '32px' }}>
           <div style={{
             width: '56px', height: '56px', borderRadius: '16px',
@@ -41,9 +44,9 @@ export default function LoginPage() {
             <span style={{ color: 'white', fontSize: '24px', fontWeight: 'bold' }}>T</span>
           </div>
           <h1 style={{ fontSize: '20px', fontWeight: 'bold', color: '#0f172a', margin: '0 0 4px' }}>
-            タイ駐在員事務所
+            {t('タイ駐在員事務所')}
           </h1>
-          <p style={{ fontSize: '14px', color: '#64748b', margin: 0 }}>運営管理システム</p>
+          <p style={{ fontSize: '14px', color: '#64748b', margin: 0 }}>{t('運営管理システム')}</p>
         </div>
 
         <form onSubmit={handleLogin} style={{
@@ -53,7 +56,7 @@ export default function LoginPage() {
         }}>
           <div style={{ marginBottom: '16px' }}>
             <label style={{ fontSize: '14px', fontWeight: '500', color: '#1e293b', display: 'block', marginBottom: '6px' }}>
-              メールアドレス
+              {t('メールアドレス')}
             </label>
             <input
               type="email"
@@ -71,7 +74,7 @@ export default function LoginPage() {
 
           <div style={{ marginBottom: '16px' }}>
             <label style={{ fontSize: '14px', fontWeight: '500', color: '#1e293b', display: 'block', marginBottom: '6px' }}>
-              パスワード
+              {t('パスワード')}
             </label>
             <input
               type="password"
@@ -106,12 +109,12 @@ export default function LoginPage() {
               fontSize: '14px', fontWeight: '500', cursor: loading ? 'not-allowed' : 'pointer'
             }}
           >
-            {loading ? 'ログイン中...' : 'ログイン'}
+            {loading ? t('ログイン中...') : t('ログイン')}
           </button>
         </form>
 
         <p style={{ textAlign: 'center', fontSize: '12px', color: '#94a3b8', marginTop: '16px' }}>
-          アカウントはSupabaseで管理されています
+          {t('アカウントはSupabaseで管理されています')}
         </p>
       </div>
     </div>
