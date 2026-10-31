@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Plus, Download, Paperclip, Sparkles, FileText, Check } from 'lucide-react'
 import { CATEGORIES, PAYMENT_METHODS, ACTIVITY_TYPES, RATE } from '@/lib/utils'
-import { createWorker, type Worker as TesseractWorker } from 'tesseract.js'
+import { useI18n } from '@/lib/i18n'
 import type { Expense, Activity, Budget, MonthlyReport, ExpenseCategory, PaymentMethod, ActivityType, BudgetLineItem } from '@/lib/supabase/types'
 
 // ─── 共通 ─────────────────────────────────────────────────────
@@ -37,78 +37,15 @@ const TYPE_COLOR: Record<string,string> = {
   '出張':'bg-amber-50 text-amber-700','電話':'bg-purple-50 text-purple-700','その他':'bg-slate-100 text-slate-600'
 }
 
-// ─── レシートOCR（ブラウザ完結・Tesseract.js／APIキー不要） ──────────
-let _ocrWorkerPromise: Promise<TesseractWorker> | null = null
-function getOcrWorker() {
-  if (!_ocrWorkerPromise) _ocrWorkerPromise = createWorker(['eng', 'tha'])
-  return _ocrWorkerPromise
-}
-
-type ParsedReceipt = {
-  vendor: string | null
-  amount_thb: number | null
-  expense_date: string | null
-  category: ExpenseCategory | null
-  confidence: number
-  rawText: string
-}
-
-function parseReceiptText(rawText: string, confidence: number): ParsedReceipt {
-  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean)
-  const vendor = lines[0] ? lines[0].slice(0, 30) : null
-
-  // 金額：「รวม/ยอดรวม/Total」等の行を優先、なければ本文中の最大の金額らしき数値
-  const totalKeywords = /รวม|ยอดรวม|สุทธิ|total|grand\s*total|net\s*amount/i
-  let amount: number | null = null
-  for (const line of lines) {
-    if (totalKeywords.test(line)) {
-      const nums = line.replace(/,/g, '').match(/\d+(\.\d{1,2})?/g)
-      if (nums && nums.length) { amount = parseFloat(nums[nums.length - 1]); break }
-    }
-  }
-  if (amount == null) {
-    const nums = (rawText.match(/\d{1,3}(,\d{3})*(\.\d{1,2})?/g) || [])
-      .map(s => parseFloat(s.replace(/,/g, '')))
-      .filter(n => !isNaN(n) && n > 0 && n < 1000000)
-    if (nums.length) amount = Math.max(...nums)
-  }
-
-  // 日付：dd/mm/yyyy 等（タイの仏暦=西暦+543の場合は西暦に変換）、なければ yyyy-mm-dd
-  let expense_date: string | null = null
-  const dmy = rawText.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/)
-  if (dmy) {
-    const [, d, m, yRaw] = dmy
-    let year = parseInt(yRaw.length === 2 ? '20' + yRaw : yRaw)
-    if (year > 2400) year -= 543
-    if (year > 2000 && year < 2100) expense_date = `${year}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-  }
-  if (!expense_date) {
-    const iso = rawText.match(/(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/)
-    if (iso) { const [, y, m, d] = iso; expense_date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}` }
-  }
-
-  // カテゴリ：キーワードによる簡易推定（OCRは意味理解ができないため参考程度）
-  const catRules: [RegExp, ExpenseCategory][] = [
-    [/taxi|แท็กซี่|grab|เชื้อเพลิง|fuel|ปั๊มน้ำมัน|parking|bts|mrt|จอดรถ/i, '交通費'],
-    [/hotel|โรงแรม|airline|สายการบิน|airport|สนามบิน/i, '出張費'],
-    [/restaurant|ร้านอาหาร|cafe|coffee|ภัตตาคาร|food/i, '接待交際費'],
-    [/office|เครื่องเขียน|stationery|store|mart|เซเว่น|7-eleven/i, '備品'],
-    [/phone|internet|true|ais|dtac|mobile/i, '通信費'],
-  ]
-  let category: ExpenseCategory | null = null
-  for (const [re, cat] of catRules) { if (re.test(rawText)) { category = cat; break } }
-
-  return { vendor, amount_thb: amount, expense_date, category, confidence, rawText }
-}
-
 // ─── ダッシュボード ────────────────────────────────────────────
 export function DashboardContent() {
+  const { t, lang } = useI18n()
   const supabase = createBrowserClient()
   const now = new Date()
   const year = now.getFullYear(); const month = now.getMonth()+1
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [activities, setActivities] = useState<Activity[]>([])
-  const [expChart, setExpChart] = useState<{month:string;経費:number}[]>([])
+  const [expChart, setExpChart] = useState<{month:string;exp:number}[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -123,37 +60,37 @@ export function DashboardContent() {
       setExpenses(e.data??[]); setActivities(a.data??[])
       const byMonth: Record<string,number>={}
       for(const row of h.data??[]) { const m=row.expense_date.slice(0,7); byMonth[m]=(byMonth[m]??0)+row.amount_jpy }
-      setExpChart(Object.entries(byMonth).sort().map(([m,v])=>({month:m.slice(5),経費:Math.round(v/10000)})))
+      setExpChart(Object.entries(byMonth).sort().map(([m,v])=>({month:m.slice(5),exp:Math.round(v/10000)})))
       setLoading(false)
     })
   },[year,month])
 
-  if(loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
+  if(loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">{t('読み込み中...')}</p></div>
   const totalThb=expenses.reduce((s,e)=>s+e.amount_thb,0)
   const totalJpy=expenses.reduce((s,e)=>s+e.amount_jpy,0)
   const companies=new Set(activities.filter(a=>a.company_name).map(a=>a.company_name)).size
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
-      <div><h1 className="text-xl font-bold text-slate-900">{year}年{month}月 ダッシュボード</h1>
-        <p className="text-sm text-slate-500 mt-0.5">タイ駐在員事務所 運営状況</p></div>
+      <div><h1 className="text-xl font-bold text-slate-900">{t('{y}年{m}月 ダッシュボード',{y:year,m:month})}</h1>
+        <p className="text-sm text-slate-500 mt-0.5">{t('タイ駐在員事務所 運営状況')}</p></div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KPICard label="今月経費（円）" value={`¥${Math.round(totalJpy/10000)}万`} sub={`฿${Math.round(totalThb).toLocaleString()}`} />
-        <KPICard label="今月訪問" value={`${activities.filter(a=>a.activity_type==='訪問').length}件`} sub={`${companies}社`} />
-        <KPICard label="WEB会議" value={`${activities.filter(a=>a.activity_type==='WEB会議').length}件`} />
-        <KPICard label="出張日数" value={`${activities.filter(a=>a.is_business_trip).length}日`} />
-        <KPICard label="活動合計" value={`${activities.length}件`} />
-        <KPICard label="顧客接触" value={`${companies}社`} />
+        <KPICard label={t('今月経費（円）')} value={lang==='ja'?`¥${Math.round(totalJpy/10000)}万`:`¥${Math.round(totalJpy).toLocaleString()}`} sub={`฿${Math.round(totalThb).toLocaleString()}`} />
+        <KPICard label={t('今月訪問')} value={t('{n}件',{n:activities.filter(a=>a.activity_type==='訪問').length})} sub={t('{n}社',{n:companies})} />
+        <KPICard label={t('WEB会議')} value={t('{n}件',{n:activities.filter(a=>a.activity_type==='WEB会議').length})} />
+        <KPICard label={t('出張日数')} value={t('{n}日',{n:activities.filter(a=>a.is_business_trip).length})} />
+        <KPICard label={t('活動合計')} value={t('{n}件',{n:activities.length})} />
+        <KPICard label={t('顧客接触')} value={t('{n}社',{n:companies})} />
       </div>
       {expChart.length>0 && (
-        <Card><CardHeader className="pb-2"><CardTitle className="text-sm font-medium">経費推移（万円）</CardTitle></CardHeader>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm font-medium">{t('経費推移（万円）')}</CardTitle></CardHeader>
           <CardContent><ResponsiveContainer width="100%" height={200}>
             <BarChart data={expChart}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="month" tick={{fontSize:11}} />
               <YAxis tick={{fontSize:11}} />
               <Tooltip />
-              <Bar dataKey="経費" fill="#2563eb" radius={[3,3,0,0]} />
+              <Bar dataKey="exp" name={t('経費')} fill="#2563eb" radius={[3,3,0,0]} />
             </BarChart>
           </ResponsiveContainer></CardContent>
         </Card>
@@ -162,264 +99,9 @@ export function DashboardContent() {
   )
 }
 
-// ─── 経費管理 ──────────────────────────────────────────────────
-function ExpenseEditDialog({ expense, onClose, onSaved }: { expense:Expense; onClose:()=>void; onSaved:()=>void }) {
-  const supabase = createBrowserClient()
-  const [form, setForm] = useState({...expense})
-  const [saving, setSaving] = useState(false)
-  const set = <K extends keyof Expense>(k:K,v:Expense[K]) => setForm(p=>({...p,[k]:v}))
-  async function save() {
-    setSaving(true)
-    const thb=Number(form.amount_thb)
-    await supabase.from('expenses').update({ expense_date:form.expense_date, category:form.category, amount_thb:thb, amount_jpy:Math.round(thb*RATE), payment_method:form.payment_method, memo:form.memo??null }).eq('id',expense.id)
-    setSaving(false); onSaved(); onClose()
-  }
-  async function del() {
-    if(!confirm('削除しますか？')) return
-    await supabase.from('expenses').delete().eq('id',expense.id)
-    onSaved(); onClose()
-  }
-  return (
-    <Dialog open onOpenChange={v=>!v&&onClose()}>
-      <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle className="text-base">経費を編集</DialogTitle></DialogHeader>
-        <div className="space-y-3 py-1">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">日付</Label>
-              <Input type="date" value={form.expense_date} onChange={e=>set('expense_date',e.target.value)} className="h-8 text-sm" /></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">カテゴリ</Label>
-              <Select value={form.category} onValueChange={v=>set('category',v as ExpenseCategory)}>
-                <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                <SelectContent>{CATEGORIES.map(c=><SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
-              </Select></div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">金額（THB）</Label>
-              <Input type="number" value={form.amount_thb} onChange={e=>set('amount_thb',Number(e.target.value))} className="h-8 text-sm" /></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">支払方法</Label>
-              <Select value={form.payment_method} onValueChange={v=>set('payment_method',v as PaymentMethod)}>
-                <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                <SelectContent>{PAYMENT_METHODS.map(p=><SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
-              </Select></div>
-          </div>
-          <div className="space-y-1"><Label className="text-xs text-slate-500">備考</Label>
-            <Textarea value={form.memo??''} onChange={e=>set('memo',e.target.value)} className="text-sm min-h-[60px] resize-none" /></div>
-        </div>
-        <DialogFooter className="gap-2">
-          <Button variant="ghost" size="sm" className="text-red-600 hover:bg-red-50 mr-auto" onClick={del}>削除</Button>
-          <Button variant="outline" size="sm" onClick={onClose}>キャンセル</Button>
-          <Button size="sm" onClick={save} disabled={saving}>{saving?'保存中...':'保存'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-export function ExpensesContent() {
-  const supabase = createBrowserClient()
-  const now = new Date()
-  const [year,setYear]=useState(now.getFullYear()); const [month,setMonth]=useState(now.getMonth()+1)
-  const [cat,setCat]=useState('all'); const [search,setSearch]=useState('')
-  const [expenses,setExpenses]=useState<Expense[]>([]); const [loading,setLoading]=useState(true)
-  const [showNew,setShowNew]=useState(false); const [editTarget,setEditTarget]=useState<Expense|null>(null)
-  const [newForm,setNewForm]=useState({date:now.toISOString().slice(0,10),category:'交通費' as ExpenseCategory,payment:'現金' as PaymentMethod,amount:'',memo:''})
-  const [saving,setSaving]=useState(false)
-  // ── レシートOCR関連 ──
-  const [receiptFile,setReceiptFile]=useState<File|null>(null)
-  const [receiptPreview,setReceiptPreview]=useState<string|null>(null)
-  const [ocrLoading,setOcrLoading]=useState(false)
-  const [ocrWarning,setOcrWarning]=useState<string|null>(null)
-  const [ocrRaw,setOcrRaw]=useState<Record<string,unknown>|null>(null)
-
-  const load=useCallback(async()=>{
-    setLoading(true)
-    const start=`${year}-${String(month).padStart(2,'0')}-01`
-    const end=month===12?`${year+1}-01-01`:`${year}-${String(month+1).padStart(2,'0')}-01`
-    let q=supabase.from('expenses').select('*').gte('expense_date',start).lt('expense_date',end).order('expense_date',{ascending:false})
-    if(cat!=='all') q=q.eq('category',cat)
-    const {data}=await q; setExpenses(data??[]); setLoading(false)
-  },[year,month,cat])
-  useEffect(()=>{load()},[load])
-
-  const filtered=expenses.filter(e=>!search||(e.memo??'').includes(search)||e.category.includes(search))
-  const totalThb=filtered.reduce((s,e)=>s+e.amount_thb,0)
-  const totalJpy=filtered.reduce((s,e)=>s+e.amount_jpy,0)
-
-  function exportCSV() {
-    const h='日付,カテゴリ,THB,円,支払方法,備考'
-    const lines=filtered.map(e=>`${e.expense_date},${e.category},${e.amount_thb},${e.amount_jpy},${e.payment_method},"${(e.memo??'').replace(/"/g,'""')}"`)
-    const b=new Blob(['﻿'+[h,...lines].join('\n')],{type:'text/csv;charset=utf-8;'})
-    const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`経費_${year}-${month}.csv`; a.click()
-  }
-
-  function resetReceipt() {
-    setReceiptFile(null); setReceiptPreview(null); setOcrWarning(null); setOcrRaw(null)
-  }
-
-  async function handleReceiptSelect(file: File | null) {
-    if (!file) return
-    setReceiptFile(file)
-    setOcrWarning(null)
-    const previewUrl = URL.createObjectURL(file)
-    setReceiptPreview(previewUrl)
-    setOcrLoading(true)
-    try {
-      const worker = await getOcrWorker()
-      const { data } = await worker.recognize(file)
-      const parsed = parseReceiptText(data.text, data.confidence)
-      setNewForm(f => ({
-        ...f,
-        date: parsed.expense_date ?? f.date,
-        category: parsed.category ?? f.category,
-        amount: parsed.amount_thb != null ? String(parsed.amount_thb) : f.amount,
-        memo: parsed.vendor ?? f.memo,
-      }))
-      setOcrRaw(parsed as unknown as Record<string, unknown>)
-      if (parsed.confidence < 60 || parsed.amount_thb == null) {
-        setOcrWarning('レシートの読み取り精度が低いようです。内容を必ずご確認・修正してください。')
-      }
-    } catch {
-      setOcrWarning('レシートの読み取り中にエラーが発生しました。手入力してください。')
-    } finally {
-      setOcrLoading(false)
-    }
-  }
-
-  async function saveNew() {
-    if(!newForm.amount) return; setSaving(true)
-    const {data:{user}}=await supabase.auth.getUser()
-    const thb=parseFloat(newForm.amount)
-    let receiptUrl: string | null = null
-    if (user && receiptFile) {
-      const path = `${user.id}/${Date.now()}-${receiptFile.name}`
-      const { error: upErr } = await supabase.storage.from('receipts').upload(path, receiptFile)
-      if (!upErr) {
-        const { data: pub } = supabase.storage.from('receipts').getPublicUrl(path)
-        receiptUrl = pub.publicUrl
-      }
-      // アップロードに失敗しても経費データ自体の保存は継続する（レシート画像は任意項目）
-    }
-    if(user) await supabase.from('expenses').insert({
-      user_id:user.id,expense_date:newForm.date,category:newForm.category,amount_thb:thb,
-      amount_jpy:Math.round(thb*RATE),exchange_rate:RATE,payment_method:newForm.payment,memo:newForm.memo||null,
-      receipt_url:receiptUrl,ocr_raw:ocrRaw,
-    })
-    setSaving(false); setShowNew(false); setNewForm(f=>({...f,amount:'',memo:''})); resetReceipt(); load()
-  }
-
-  return (
-    <div className="p-6 space-y-4 max-w-4xl">
-      <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">経費管理</h1>
-          <p className="text-sm text-slate-500 mt-0.5">{year}年{month}月 — {filtered.length}件</p></div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={exportCSV} disabled={!filtered.length}><Download size={13} className="mr-1"/>CSV</Button>
-          <Button size="sm" onClick={()=>{setShowNew(v=>!v); if(showNew) resetReceipt()}}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'経費を追加'}</Button>
-        </div>
-      </div>
-      {showNew && (
-        <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
-          <p className="text-sm font-semibold">新規経費入力</p>
-
-          {/* レシート写真アップロード（OCR自動入力） */}
-          <div className="rounded-lg border border-dashed border-blue-300 bg-white p-3">
-            <div className="flex items-center gap-3">
-              {receiptPreview ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={receiptPreview} alt="レシート" className="w-14 h-14 object-cover rounded border" />
-              ) : (
-                <div className="w-14 h-14 rounded border border-slate-200 flex items-center justify-center text-slate-300"><Paperclip size={20}/></div>
-              )}
-              <div className="flex-1 min-w-0">
-                <label className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 cursor-pointer hover:underline">
-                  <Paperclip size={13}/>
-                  {receiptFile ? '別のレシートを選び直す' : 'レシート写真を選択（自動入力）'}
-                  <input type="file" accept="image/*" capture="environment" className="hidden"
-                    onChange={e=>handleReceiptSelect(e.target.files?.[0] ?? null)} />
-                </label>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  {ocrLoading ? '解析中...（初回はOCRエンジンの読み込みで時間がかかることがあります）' : receiptFile ? '内容を自動入力しました。読み取り精度は高くないため、必ず下記を確認・修正してください。' : '写真を選ぶと日付・金額・カテゴリを自動入力します（ブラウザ内で処理・APIキー不要／任意項目）'}
-                </p>
-              </div>
-              {receiptFile && !ocrLoading && (
-                <button type="button" onClick={resetReceipt} className="text-xs text-slate-400 hover:text-slate-600">クリア</button>
-              )}
-            </div>
-            {ocrWarning && <p className="text-[11px] text-amber-600 mt-2">⚠ {ocrWarning}</p>}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">日付</Label>
-              <Input type="date" value={newForm.date} onChange={e=>setNewForm(f=>({...f,date:e.target.value}))} className="h-8 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">カテゴリ</Label>
-              <Select value={newForm.category} onValueChange={v=>setNewForm(f=>({...f,category:v as ExpenseCategory}))}>
-                <SelectTrigger className="h-8 text-sm"><SelectValue/></SelectTrigger>
-                <SelectContent>{CATEGORIES.map(c=><SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
-              </Select></div>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">฿</span>
-              <Input type="number" value={newForm.amount} onChange={e=>setNewForm(f=>({...f,amount:e.target.value}))} placeholder="0" className="h-8 text-sm pl-6"/></div>
-            {newForm.amount&&<span className="text-xs text-slate-500 whitespace-nowrap">≈ ¥{Math.round(parseFloat(newForm.amount)*RATE).toLocaleString()}</span>}
-            <Select value={newForm.payment} onValueChange={v=>setNewForm(f=>({...f,payment:v as PaymentMethod}))}>
-              <SelectTrigger className="h-8 text-sm w-28"><SelectValue/></SelectTrigger>
-              <SelectContent>{PAYMENT_METHODS.map(p=><SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
-            </Select>
-          </div>
-          <Input placeholder="備考（任意）" value={newForm.memo} onChange={e=>setNewForm(f=>({...f,memo:e.target.value}))} className="h-8 text-sm"/>
-          <Button size="sm" onClick={saveNew} disabled={saving||!newForm.amount||ocrLoading} className="w-full">{saving?'保存中...':'経費を保存'}</Button>
-        </CardContent></Card>
-      )}
-      <div className="grid grid-cols-3 gap-3">
-        <Card><CardContent className="pt-4 pb-3"><p className="text-xs text-slate-500 mb-1">合計（THB）</p><p className="text-lg font-bold">฿{Math.round(totalThb).toLocaleString()}</p></CardContent></Card>
-        <Card><CardContent className="pt-4 pb-3"><p className="text-xs text-slate-500 mb-1">合計（円）</p><p className="text-lg font-bold">¥{Math.round(totalJpy).toLocaleString()}</p></CardContent></Card>
-        <Card><CardContent className="pt-4 pb-3"><p className="text-xs text-slate-500 mb-1">件数</p><p className="text-lg font-bold">{filtered.length}件</p></CardContent></Card>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{y}年</SelectItem>)}</SelectContent></Select>
-        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{m}月</SelectItem>)}</SelectContent></Select>
-        <Select value={cat} onValueChange={setCat}><SelectTrigger className="w-32 h-8 text-sm"><SelectValue placeholder="全カテゴリ"/></SelectTrigger><SelectContent><SelectItem value="all">全カテゴリ</SelectItem>{CATEGORIES.map(c=><SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select>
-        <Input placeholder="キーワード検索..." value={search} onChange={e=>setSearch(e.target.value)} className="h-8 text-sm w-36"/>
-      </div>
-      <Card><CardContent className="p-0">
-        {loading?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">読み込み中...</p></div>
-        :filtered.length===0?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">データがありません</p></div>
-        :<div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="border-b bg-slate-50">
-              <th className="text-left py-2.5 px-4 text-xs font-medium text-slate-500">日付</th>
-              <th className="text-left py-2.5 px-3 text-xs font-medium text-slate-500">カテゴリ</th>
-              <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">THB</th>
-              <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">円</th>
-              <th className="text-left py-2.5 px-3 text-xs font-medium text-slate-500">支払</th>
-              <th className="text-left py-2.5 px-3 text-xs font-medium text-slate-500">備考</th>
-            </tr></thead>
-            <tbody>{filtered.map(e=>(
-              <tr key={e.id} className="border-b hover:bg-slate-50 cursor-pointer" onClick={()=>setEditTarget(e)}>
-                <td className="py-3 px-4 tabular-nums text-slate-600">{e.expense_date.slice(5).replace('-','/')}</td>
-                <td className="py-3 px-3"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CAT_COLOR[e.category]}`}>{e.category}</span></td>
-                <td className="py-3 px-3 text-right tabular-nums text-slate-500">฿{e.amount_thb.toLocaleString()}</td>
-                <td className="py-3 px-3 text-right tabular-nums font-semibold">¥{Math.round(e.amount_jpy).toLocaleString()}</td>
-                <td className="py-3 px-3 text-xs text-slate-500">{e.payment_method}</td>
-                <td className="py-3 px-3 text-xs text-slate-500 truncate max-w-[140px]">{e.memo??'—'}</td>
-              </tr>
-            ))}</tbody>
-            <tfoot><tr className="border-t bg-slate-50">
-              <td className="py-2.5 px-4 text-xs text-slate-500 font-medium" colSpan={2}>{filtered.length}件合計</td>
-              <td className="py-2.5 px-3 text-right font-semibold text-sm">฿{Math.round(totalThb).toLocaleString()}</td>
-              <td className="py-2.5 px-3 text-right font-semibold text-sm">¥{Math.round(totalJpy).toLocaleString()}</td>
-              <td colSpan={2}/>
-            </tr></tfoot>
-          </table>
-        </div>}
-      </CardContent></Card>
-      {editTarget&&<ExpenseEditDialog expense={editTarget} onClose={()=>setEditTarget(null)} onSaved={load}/>}
-    </div>
-  )
-}
-
 // ─── 活動管理 ──────────────────────────────────────────────────
 function ActivityEditDialog({ activity, onClose, onSaved }: { activity:Activity; onClose:()=>void; onSaved:()=>void }) {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const [form, setForm] = useState({...activity}); const [saving, setSaving] = useState(false)
   const set = <K extends keyof Activity>(k:K,v:Activity[K]) => setForm(p=>({...p,[k]:v}))
@@ -429,34 +111,34 @@ function ActivityEditDialog({ activity, onClose, onSaved }: { activity:Activity;
     setSaving(false); onSaved(); onClose()
   }
   async function del() {
-    if(!confirm('削除しますか？')) return
+    if(!confirm(t('削除しますか？'))) return
     await supabase.from('activities').delete().eq('id',activity.id); onSaved(); onClose()
   }
   return (
     <Dialog open onOpenChange={v=>!v&&onClose()}>
       <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle className="text-base">活動を編集</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle className="text-base">{t('活動を編集')}</DialogTitle></DialogHeader>
         <div className="space-y-3 py-1">
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">日付</Label><Input type="date" value={form.activity_date} onChange={e=>set('activity_date',e.target.value)} className="h-8 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">種別</Label>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('日付')}</Label><Input type="date" value={form.activity_date} onChange={e=>set('activity_date',e.target.value)} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('種別')}</Label>
               <Select value={form.activity_type} onValueChange={v=>set('activity_type',v as ActivityType)}>
                 <SelectTrigger className="h-8 text-sm"><SelectValue/></SelectTrigger>
-                <SelectContent>{ACTIVITY_TYPES.map(t=><SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+                <SelectContent>{ACTIVITY_TYPES.map(ty=><SelectItem key={ty} value={ty}>{t(ty)}</SelectItem>)}</SelectContent>
               </Select></div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">会社名</Label><input value={form.company_name??''} onChange={e=>set('company_name',e.target.value||null)} className="w-full border rounded-md px-3 py-1.5 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">担当者</Label><input value={form.contact_person??''} onChange={e=>set('contact_person',e.target.value||null)} className="w-full border rounded-md px-3 py-1.5 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('会社名')}</Label><input value={form.company_name??''} onChange={e=>set('company_name',e.target.value||null)} className="w-full border rounded-md px-3 py-1.5 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('担当者')}</Label><input value={form.contact_person??''} onChange={e=>set('contact_person',e.target.value||null)} className="w-full border rounded-md px-3 py-1.5 text-sm"/></div>
           </div>
-          <div className="space-y-1"><Label className="text-xs text-slate-500">活動内容</Label><Textarea value={form.content??''} onChange={e=>set('content',e.target.value||null)} className="text-sm min-h-[60px] resize-none"/></div>
-          <div className="space-y-1"><Label className="text-xs text-slate-500">結果・所見</Label><Textarea value={form.outcome??''} onChange={e=>set('outcome',e.target.value||null)} className="text-sm min-h-[60px] resize-none"/></div>
-          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={form.is_business_trip} onChange={e=>set('is_business_trip',e.target.checked)}/>出張フラグ</label>
+          <div className="space-y-1"><Label className="text-xs text-slate-500">{t('活動内容')}</Label><Textarea value={form.content??''} onChange={e=>set('content',e.target.value||null)} className="text-sm min-h-[60px] resize-none"/></div>
+          <div className="space-y-1"><Label className="text-xs text-slate-500">{t('結果・所見')}</Label><Textarea value={form.outcome??''} onChange={e=>set('outcome',e.target.value||null)} className="text-sm min-h-[60px] resize-none"/></div>
+          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={form.is_business_trip} onChange={e=>set('is_business_trip',e.target.checked)}/>{t('出張フラグ')}</label>
         </div>
         <DialogFooter className="gap-2">
-          <Button variant="ghost" size="sm" className="text-red-600 hover:bg-red-50 mr-auto" onClick={del}>削除</Button>
-          <Button variant="outline" size="sm" onClick={onClose}>キャンセル</Button>
-          <Button size="sm" onClick={save} disabled={saving}>{saving?'保存中...':'保存'}</Button>
+          <Button variant="ghost" size="sm" className="text-red-600 hover:bg-red-50 mr-auto" onClick={del}>{t('削除')}</Button>
+          <Button variant="outline" size="sm" onClick={onClose}>{t('キャンセル')}</Button>
+          <Button size="sm" onClick={save} disabled={saving}>{saving?t('保存中...'):t('保存')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -464,6 +146,7 @@ function ActivityEditDialog({ activity, onClose, onSaved }: { activity:Activity;
 }
 
 export function ActivitiesContent() {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const now = new Date()
   const [year,setYear]=useState(now.getFullYear()); const [month,setMonth]=useState(now.getMonth()+1)
@@ -483,7 +166,7 @@ export function ActivitiesContent() {
   useEffect(()=>{load()},[load])
 
   const filtered=activities.filter(a=>!search||(a.company_name??'').includes(search)||(a.content??'').includes(search))
-  const counts=ACTIVITY_TYPES.reduce<Record<string,number>>((a,t)=>({...a,[t]:activities.filter(x=>x.activity_type===t).length}),{})
+  const counts=ACTIVITY_TYPES.reduce<Record<string,number>>((a,ty)=>({...a,[ty]:activities.filter(x=>x.activity_type===ty).length}),{})
 
   async function addActivity() {
     setSaving(true)
@@ -495,49 +178,49 @@ export function ActivitiesContent() {
   return (
     <div className="p-6 space-y-4 max-w-4xl">
       <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">活動管理</h1><p className="text-sm text-slate-500 mt-0.5">{year}年{month}月 — {filtered.length}件</p></div>
-        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'活動を追加'}</Button>
+        <div><h1 className="text-xl font-bold text-slate-900">{t('活動管理')}</h1><p className="text-sm text-slate-500 mt-0.5">{t('{y}年{m}月',{y:year,m:month})} — {t('{n}件',{n:filtered.length})}</p></div>
+        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?t('閉じる'):t('活動を追加')}</Button>
       </div>
       <div className="grid grid-cols-5 gap-2">
-        {ACTIVITY_TYPES.map(t=>(
-          <Card key={t} className={`cursor-pointer transition-colors ${typeFilter===t?'border-blue-400 bg-blue-50':''}`} onClick={()=>setTypeFilter(t===typeFilter?'all':t)}>
-            <CardContent className="pt-4 pb-3 text-center"><p className="text-xl font-bold">{counts[t]}</p><p className="text-xs text-slate-500 mt-0.5">{t}</p></CardContent>
+        {ACTIVITY_TYPES.map(ty=>(
+          <Card key={ty} className={`cursor-pointer transition-colors ${typeFilter===ty?'border-blue-400 bg-blue-50':''}`} onClick={()=>setTypeFilter(ty===typeFilter?'all':ty)}>
+            <CardContent className="pt-4 pb-3 text-center"><p className="text-xl font-bold">{counts[ty]}</p><p className="text-xs text-slate-500 mt-0.5">{t(ty)}</p></CardContent>
           </Card>
         ))}
       </div>
       {showNew&&(
         <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
-          <p className="text-sm font-semibold">新規活動入力</p>
+          <p className="text-sm font-semibold">{t('新規活動入力')}</p>
           <div className="grid grid-cols-2 gap-3">
             <Input type="date" value={newForm.date} onChange={e=>setNewForm(f=>({...f,date:e.target.value}))} className="h-8 text-sm"/>
-            <Select value={newForm.type} onValueChange={v=>setNewForm(f=>({...f,type:v as ActivityType}))}><SelectTrigger className="h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{ACTIVITY_TYPES.map(t=><SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select>
+            <Select value={newForm.type} onValueChange={v=>setNewForm(f=>({...f,type:v as ActivityType}))}><SelectTrigger className="h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{ACTIVITY_TYPES.map(ty=><SelectItem key={ty} value={ty}>{t(ty)}</SelectItem>)}</SelectContent></Select>
           </div>
-          <Input placeholder="会社名（任意）" value={newForm.company} onChange={e=>setNewForm(f=>({...f,company:e.target.value}))} className="h-8 text-sm"/>
-          <textarea placeholder="活動内容（任意）" value={newForm.content} onChange={e=>setNewForm(f=>({...f,content:e.target.value}))} rows={2} className="w-full border rounded-md px-3 py-1.5 text-sm resize-none"/>
+          <Input placeholder={t('会社名（任意）')} value={newForm.company} onChange={e=>setNewForm(f=>({...f,company:e.target.value}))} className="h-8 text-sm"/>
+          <textarea placeholder={t('活動内容（任意）')} value={newForm.content} onChange={e=>setNewForm(f=>({...f,content:e.target.value}))} rows={2} className="w-full border rounded-md px-3 py-1.5 text-sm resize-none"/>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" className="flex-1" onClick={()=>setShowNew(false)}>キャンセル</Button>
-            <Button size="sm" className="flex-1" onClick={addActivity} disabled={saving}>{saving?'保存中...':'記録する'}</Button>
+            <Button variant="outline" size="sm" className="flex-1" onClick={()=>setShowNew(false)}>{t('キャンセル')}</Button>
+            <Button size="sm" className="flex-1" onClick={addActivity} disabled={saving}>{saving?t('保存中...'):t('記録する')}</Button>
           </div>
         </CardContent></Card>
       )}
       <div className="flex flex-wrap gap-2">
-        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{y}年</SelectItem>)}</SelectContent></Select>
-        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{m}月</SelectItem>)}</SelectContent></Select>
-        <Input placeholder="会社名・内容で検索..." value={search} onChange={e=>setSearch(e.target.value)} className="h-8 text-sm w-44"/>
+        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{t('{y}年',{y})}</SelectItem>)}</SelectContent></Select>
+        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{t('{m}月',{m})}</SelectItem>)}</SelectContent></Select>
+        <Input placeholder={t('会社名・内容で検索...')} value={search} onChange={e=>setSearch(e.target.value)} className="h-8 text-sm w-44"/>
       </div>
       <Card><CardContent className="p-0">
-        {loading?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">読み込み中...</p></div>
-        :filtered.length===0?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">データがありません</p></div>
+        {loading?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">{t('読み込み中...')}</p></div>
+        :filtered.length===0?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">{t('データがありません')}</p></div>
         :<div className="divide-y">{filtered.map(a=>(
           <div key={a.id} className="flex items-start gap-3 p-4 hover:bg-slate-50 cursor-pointer" onClick={()=>setEditTarget(a)}>
-            <span className={`mt-0.5 text-xs px-2 py-1 rounded-full font-medium shrink-0 ${TYPE_COLOR[a.activity_type]}`}>{a.activity_type}</span>
+            <span className={`mt-0.5 text-xs px-2 py-1 rounded-full font-medium shrink-0 ${TYPE_COLOR[a.activity_type]}`}>{t(a.activity_type)}</span>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-0.5">
                 <span className="text-sm font-medium truncate">{a.company_name??'—'}</span>
                 {a.contact_person&&<span className="text-xs text-slate-500">/ {a.contact_person}</span>}
-                {a.is_business_trip&&<span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">出張</span>}
+                {a.is_business_trip&&<span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">{t('出張')}</span>}
               </div>
-              <p className="text-xs text-slate-500 truncate">{a.content??'内容未記載'}</p>
+              <p className="text-xs text-slate-500 truncate">{a.content??t('内容未記載')}</p>
             </div>
             <span className="text-xs text-slate-400 shrink-0">{a.activity_date.slice(5).replace('-','/')}</span>
           </div>
@@ -549,417 +232,6 @@ export function ActivitiesContent() {
 }
 
 // ─── 予算管理 ──────────────────────────────────────────────────
-const MONTHS=Array.from({length:12},(_,i)=>i+1)
-function pctColor(a:number,b:number){ if(b===0) return ''; const r=a/b; return r>1.1?'text-red-600 font-semibold':r>.9?'text-amber-600':'text-green-700' }
-
-export function BudgetContent() {
-  const supabase = createBrowserClient()
-  const now = new Date()
-  const [year, setYear] = useState(now.getFullYear())
-  const [selMonth, setSelMonth] = useState(now.getMonth()+1)
-  const [bm, setBm] = useState<Record<string,Record<number,number>>>({})
-  const [am, setAm] = useState<Record<string,Record<number,number>>>({})
-  const [lineItems, setLineItems] = useState<Record<string, BudgetLineItem[]>>({})
-  const [lineAmounts, setLineAmounts] = useState<Record<string, Record<number,number>>>({})
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [dirty, setDirty] = useState<Set<string>>(new Set())
-  const [msg, setMsg] = useState('')
-  const [rate, setRate] = useState(4.8)
-  const MONTHS = Array.from({length:12},(_,i)=>i+1)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    // 為替レート取得
-    const { data: rateData } = await supabase.from('settings').select('value').eq('key','exchange_rate').single()
-    if (rateData) setRate(parseFloat(rateData.value))
-
-    const [bRes, eRes, liRes, laRes] = await Promise.all([
-      supabase.from('budgets').select('*').eq('fiscal_year', year),
-      supabase.from('expenses').select('category,expense_date,amount_thb').gte('expense_date',`${year}-01-01`).lte('expense_date',`${year}-12-31`),
-      supabase.from('budget_line_items').select('*').order('category').order('sort_order'),
-      supabase.from('budget_line_amounts').select('*').eq('fiscal_year', year),
-    ])
-
-    // 予算データをカテゴリ×月のマップに変換
-    const newBm: Record<string,Record<number,number>> = {}
-    for (const b of (bRes.data ?? [])) {
-      if (!newBm[b.category]) newBm[b.category] = {}
-      newBm[b.category][b.month] = b.amount_thb
-    }
-    setBm(newBm)
-
-    // 実績データをカテゴリ×月のマップに変換（THBベース）
-    const newAm: Record<string,Record<number,number>> = {}
-    for (const e of (eRes.data ?? [])) {
-      const m = parseInt(e.expense_date.slice(5,7))
-      if (!newAm[e.category]) newAm[e.category] = {}
-      newAm[e.category][m] = (newAm[e.category][m] ?? 0) + e.amount_thb
-    }
-    setAm(newAm)
-
-    // 予算内訳マスタ（カテゴリごとの明細一覧）
-    const newLineItems: Record<string, BudgetLineItem[]> = {}
-    for (const li of (liRes.data ?? [])) {
-      if (!newLineItems[li.category]) newLineItems[li.category] = []
-      newLineItems[li.category].push(li)
-    }
-    setLineItems(newLineItems)
-
-    // 内訳ごとの月次金額
-    const newLineAmounts: Record<string, Record<number,number>> = {}
-    for (const la of (laRes.data ?? [])) {
-      if (!newLineAmounts[la.line_item_id]) newLineAmounts[la.line_item_id] = {}
-      newLineAmounts[la.line_item_id][la.month] = la.amount_thb
-    }
-    setLineAmounts(newLineAmounts)
-
-    setLoading(false)
-  }, [year])
-  useEffect(() => { load() }, [load])
-
-  // 内訳マスタが設定されているカテゴリは、内訳の合計をカテゴリの予算として扱う
-  const hasLineItems = (cat: string) => (lineItems[cat]?.length ?? 0) > 0
-  function budgetFor(cat: string, m: number) {
-    if (hasLineItems(cat)) {
-      return (lineItems[cat] ?? []).reduce((s, li) => s + (lineAmounts[li.id]?.[m] ?? 0), 0)
-    }
-    return bm[cat]?.[m] ?? 0
-  }
-
-  function updateCell(cat: string, m: number, val: string) {
-    const thb = val === '' ? 0 : parseFloat(val) || 0
-    setBm(p => ({ ...p, [cat]: { ...p[cat], [m]: thb } }))
-    setDirty(p => new Set(p).add(`${cat}__${m}`))
-  }
-
-  function updateLineCell(lineItemId: string, m: number, val: string) {
-    const thb = val === '' ? 0 : parseFloat(val) || 0
-    setLineAmounts(p => ({ ...p, [lineItemId]: { ...p[lineItemId], [m]: thb } }))
-    setDirty(p => new Set(p).add(`line__${lineItemId}__${m}`))
-  }
-
-  function toggleExpand(cat: string) {
-    setExpanded(p => { const n = new Set(p); if (n.has(cat)) n.delete(cat); else n.add(cat); return n })
-  }
-
-  async function save() {
-    if (!dirty.size) return; setSaving(true)
-    const budgetUps: { fiscal_year:number; month:number; category:string; amount_thb:number; amount_jpy:number; updated_at:string }[] = []
-    const lineUps: { fiscal_year:number; month:number; line_item_id:string; amount_thb:number; updated_at:string }[] = []
-    for (const key of dirty) {
-      if (key.startsWith('line__')) {
-        const [, lineItemId, ms] = key.split('__'); const m = parseInt(ms)
-        const thb = lineAmounts[lineItemId]?.[m] ?? 0
-        lineUps.push({ fiscal_year: year, month: m, line_item_id: lineItemId, amount_thb: thb, updated_at: new Date().toISOString() })
-      } else {
-        const [cat, ms] = key.split('__'); const m = parseInt(ms)
-        const thb = bm[cat]?.[m] ?? 0
-        budgetUps.push({ fiscal_year: year, month: m, category: cat, amount_thb: thb, amount_jpy: Math.round(thb * rate), updated_at: new Date().toISOString() })
-      }
-    }
-    if (budgetUps.length) await supabase.from('budgets').upsert(budgetUps, { onConflict: 'fiscal_year,month,category' })
-    if (lineUps.length) await supabase.from('budget_line_amounts').upsert(lineUps, { onConflict: 'fiscal_year,month,line_item_id' })
-    setDirty(new Set()); setSaving(false)
-    setMsg(`${budgetUps.length + lineUps.length}件保存しました`); setTimeout(() => setMsg(''), 3000); load()
-  }
-
-  const pctColor = (a: number, b: number) => {
-    if (b === 0) return ''
-    const r = a/b
-    return r > 1.1 ? 'text-red-600 font-semibold' : r > 0.9 ? 'text-amber-600' : 'text-green-700'
-  }
-
-  const totalB = CATEGORIES.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + budgetFor(c,m), 0), 0)
-  const totalA = CATEGORIES.reduce((s,c) => s + MONTHS.reduce((ms,m) => ms + (am[c]?.[m] ?? 0), 0), 0)
-
-  if (loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
-
-  return (
-    <div className="p-6 space-y-5 max-w-5xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">予算管理</h1>
-          <p className="text-sm text-slate-500 mt-0.5">THBベース・セルをクリックして直接編集 / 1THB = {rate}円</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link href="/budget-master" className="text-xs px-2.5 py-1.5 rounded border hover:bg-slate-50 text-slate-600 shrink-0">内訳マスタを管理</Link>
-          <Select value={String(year)} onValueChange={v => setYear(Number(v))}>
-            <SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger>
-            <SelectContent>
-              {[2026, 2027, 2028].map(y => <SelectItem key={y} value={String(y)}>{y}年度</SelectItem>)}
-            </SelectContent>
-          </Select>
-          {dirty.size > 0 && <span className="text-xs bg-amber-50 text-amber-700 border border-amber-200 px-2 py-1 rounded">未保存 {dirty.size}件</span>}
-          {msg && <span className="text-xs bg-green-50 text-green-700 border border-green-200 px-2 py-1 rounded">{msg}</span>}
-          <Button size="sm" onClick={save} disabled={saving || !dirty.size} className="h-8">{saving ? '保存中...' : '保存する'}</Button>
-        </div>
-      </div>
-
-      {/* KPIカード */}
-      <div className="grid grid-cols-4 gap-3">
-        {[
-          { label:`${year}年度 予算総額`, value:`฿${Math.round(totalB).toLocaleString()}`, sub:`¥${Math.round(totalB*rate/10000)}万` },
-          { label:'実績累計', value:`฿${Math.round(totalA).toLocaleString()}`, sub:`¥${Math.round(totalA*rate/10000)}万` },
-          { label:'消化率', value:`${totalB > 0 ? Math.round(totalA/totalB*100) : 0}%`, warn: totalA > totalB*0.9 },
-          { label:'残予算', value:`฿${Math.round(Math.max(totalB-totalA,0)).toLocaleString()}`, sub:`¥${Math.round(Math.max(totalB-totalA,0)*rate/10000)}万`, warn: totalA > totalB },
-        ].map(c => (
-          <Card key={c.label}><CardContent className="pt-4 pb-3">
-            <p className="text-xs text-slate-500 mb-1">{c.label}</p>
-            <p className={`text-xl font-bold ${c.warn ? 'text-red-600' : 'text-slate-900'}`}>{c.value}</p>
-            {c.sub && <p className="text-xs text-slate-400 mt-0.5">{c.sub}</p>}
-          </CardContent></Card>
-        ))}
-      </div>
-
-      {/* 月別バー */}
-      <Card>
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-medium">月別 消化状況（クリックで選択）</CardTitle></CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-12 gap-1.5">
-            {MONTHS.map(m => {
-              const b = CATEGORIES.reduce((s,c) => s + budgetFor(c,m), 0)
-              const a = CATEGORIES.reduce((s,c) => s + (am[c]?.[m] ?? 0), 0)
-              const pct = b > 0 ? Math.min(a/b*100, 100) : 0
-              const isOver = a > b && b > 0
-              const isSel = m === selMonth
-              return (
-                <button key={m} onClick={() => setSelMonth(m)}
-                  className={`rounded-xl border p-2 text-left transition-all ${isSel ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}`}>
-                  <p className={`text-[10px] font-medium mb-1.5 ${isSel ? 'text-blue-600' : 'text-slate-500'}`}>{m}月</p>
-                  <div style={{height:28,display:'flex',alignItems:'flex-end'}}>
-                    <div style={{width:'100%',height:`${Math.max(pct,3)}%`,background:isOver?'#dc2626':pct>75?'#d97706':'#16a34a',borderRadius:2}}/>
-                  </div>
-                  <p style={{fontSize:10,marginTop:3,color:isOver?'#dc2626':'#94a3b8'}}>{b>0?`${Math.round(pct)}%`:'未'}</p>
-                </button>
-              )
-            })}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* カテゴリ別詳細 */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-medium">{year}年 {selMonth}月 — カテゴリ別（THBベース）</CardTitle>
-            <div className="flex gap-1.5">
-              <button className="text-xs px-2 py-1 rounded border hover:bg-slate-50 text-slate-500 disabled:opacity-30" onClick={() => setSelMonth(m => Math.max(1,m-1))} disabled={selMonth===1}>← 前月</button>
-              <button className="text-xs px-2 py-1 rounded border hover:bg-slate-50 text-slate-500 disabled:opacity-30" onClick={() => setSelMonth(m => Math.min(12,m+1))} disabled={selMonth===12}>翌月 →</button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <table className="w-full text-sm">
-            <thead><tr className="border-b">
-              <th className="text-left py-2 pr-4 text-xs font-medium text-slate-500">カテゴリ</th>
-              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">予算（THB）</th>
-              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">実績（THB）</th>
-              <th className="text-right py-2 px-3 text-xs font-medium text-slate-500">差異（THB）</th>
-              <th className="text-right py-2 pl-3 text-xs font-medium text-slate-500">消化率</th>
-            </tr></thead>
-            <tbody>
-              {CATEGORIES.map(cat => {
-                const b = budgetFor(cat, selMonth)
-                const a = am[cat]?.[selMonth] ?? 0
-                const v = a - b
-                const rateVal = b > 0 ? Math.round(a/b*100) : null
-                const items = lineItems[cat] ?? []
-                const expandable = items.length > 0
-                const isOpen = expanded.has(cat)
-                return (
-                  <Fragment key={cat}>
-                    <tr className="border-b hover:bg-slate-50">
-                      <td className="py-3 pr-4 font-medium text-sm">
-                        <div className="flex items-center gap-1.5">
-                          {expandable && (
-                            <button type="button" onClick={() => toggleExpand(cat)} className="text-slate-400 hover:text-slate-700 w-3">
-                              {isOpen ? '▾' : '▸'}
-                            </button>
-                          )}
-                          <span>{cat}</span>
-                          {expandable && <span className="text-[10px] text-slate-400">（内訳{items.length}件）</span>}
-                        </div>
-                      </td>
-                      <td className="py-3 px-3 text-right">
-                        {expandable ? (
-                          <div>
-                            <p className="text-sm">฿{Math.round(b).toLocaleString()}</p>
-                            <p className="text-[10px] text-slate-400">内訳合計・¥{Math.round(b*rate).toLocaleString()}</p>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex items-center justify-end gap-1">
-                              <span className="text-xs text-slate-400">฿</span>
-                              <input type="number" value={b === 0 ? '' : Math.round(b)}
-                                onChange={e => updateCell(cat, selMonth, e.target.value)}
-                                placeholder="0"
-                                className="w-28 text-right text-sm bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
-                            </div>
-                            {b > 0 && <p className="text-[10px] text-slate-400 text-right">¥{Math.round(b*rate).toLocaleString()}</p>}
-                          </>
-                        )}
-                      </td>
-                      <td className="py-3 px-3 text-right text-sm">
-                        {a > 0 ? <div><p>฿{Math.round(a).toLocaleString()}</p><p className="text-[10px] text-slate-400">¥{Math.round(a*rate).toLocaleString()}</p></div> : '—'}
-                      </td>
-                      <td className={`py-3 px-3 text-right text-sm ${pctColor(a,b)}`}>
-                        {b === 0 ? '—' : <div><p>{(v>0?'+':'') + `฿${Math.round(v).toLocaleString()}`}</p><p className="text-[10px]">{(v>0?'+':'') + `¥${Math.round(v*rate).toLocaleString()}`}</p></div>}
-                      </td>
-                      <td className="py-3 pl-3 text-right">
-                        {rateVal !== null ? (
-                          <div>
-                            <span className={`text-xs font-semibold ${pctColor(a,b)}`}>{rateVal}%</span>
-                            <div style={{height:3,background:'#e2e8f0',borderRadius:2,marginTop:3}}>
-                              <div style={{width:`${Math.min(rateVal,100)}%`,height:'100%',borderRadius:2,background:rateVal>100?'#dc2626':rateVal>90?'#d97706':'#16a34a'}}/>
-                            </div>
-                          </div>
-                        ) : <span className="text-xs text-slate-400">—</span>}
-                      </td>
-                    </tr>
-                    {expandable && isOpen && items.map(li => {
-                      const liVal = lineAmounts[li.id]?.[selMonth] ?? 0
-                      return (
-                        <tr key={li.id} className="border-b bg-slate-50/60">
-                          <td className="py-2 pr-4 pl-8 text-xs text-slate-500">└ {li.label}</td>
-                          <td className="py-2 px-3 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              <span className="text-[10px] text-slate-400">฿</span>
-                              <input type="number" value={liVal === 0 ? '' : Math.round(liVal)}
-                                onChange={e => updateLineCell(li.id, selMonth, e.target.value)}
-                                placeholder="0"
-                                className="w-24 text-right text-xs bg-transparent border-0 border-b border-slate-200 focus:border-blue-500 focus:outline-none py-0.5 px-1"/>
-                            </div>
-                          </td>
-                          <td colSpan={3}></td>
-                        </tr>
-                      )
-                    })}
-                  </Fragment>
-                )
-              })}
-              {/* 合計行 */}
-              {(() => {
-                const tb = CATEGORIES.reduce((s,c) => s + budgetFor(c,selMonth), 0)
-                const ta = CATEGORIES.reduce((s,c) => s + (am[c]?.[selMonth] ?? 0), 0)
-                return (
-                  <tr className="border-t-2 bg-slate-50">
-                    <td className="py-3 pr-4 font-bold text-sm">合計</td>
-                    <td className="py-3 px-3 text-right font-bold text-sm">
-                      <p>฿{Math.round(tb).toLocaleString()}</p>
-                      <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(tb*rate).toLocaleString()}</p>
-                    </td>
-                    <td className="py-3 px-3 text-right font-bold text-sm">
-                      <p>฿{Math.round(ta).toLocaleString()}</p>
-                      <p className="text-[10px] text-slate-400 font-normal">¥{Math.round(ta*rate).toLocaleString()}</p>
-                    </td>
-                    <td className={`py-3 px-3 text-right font-bold text-sm ${pctColor(ta,tb)}`}>
-                      <p>{tb===0?'—':(ta-tb>0?'+':'')+'฿'+Math.round(ta-tb).toLocaleString()}</p>
-                      <p className="text-[10px] font-normal">{tb===0?'':((ta-tb>0?'+':'')+'¥'+Math.round((ta-tb)*rate).toLocaleString())}</p>
-                    </td>
-                    <td className="py-3 pl-3 text-right">
-                      {tb > 0 && <span className={`text-xs font-bold ${pctColor(ta,tb)}`}>{Math.round(ta/tb*100)}%</span>}
-                    </td>
-                  </tr>
-                )
-              })()}
-            </tbody>
-          </table>
-          <p className="text-xs text-slate-400 mt-3">予算額（THB）を入力→「保存する」で確定。為替: 1THB = {rate}円（設定画面で変更可）。内訳（▸）が設定されているカテゴリは内訳の金額を入力すると自動で合計されます。</p>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-export function BudgetMasterPage() {
-  const supabase = createBrowserClient()
-  const [items, setItems] = useState<BudgetLineItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [newLabel, setNewLabel] = useState<Record<string,string>>({})
-  const [busy, setBusy] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    const { data } = await supabase.from('budget_line_items').select('*').order('category').order('sort_order')
-    setItems(data ?? [])
-    setLoading(false)
-  }, [])
-  useEffect(() => { load() }, [load])
-
-  const byCategory = (cat: string) => items.filter(i => i.category === cat)
-
-  async function addItem(cat: string) {
-    const label = (newLabel[cat] ?? '').trim()
-    if (!label) return
-    const current = byCategory(cat)
-    if (current.length >= 10) return
-    setBusy(cat)
-    await supabase.from('budget_line_items').insert({ category: cat, label, sort_order: current.length })
-    setNewLabel(f => ({ ...f, [cat]: '' }))
-    setBusy(null); load()
-  }
-
-  async function removeItem(id: string) {
-    if (!confirm('この内訳項目を削除しますか？入力済みの月次金額も削除されます。')) return
-    await supabase.from('budget_line_items').delete().eq('id', id)
-    load()
-  }
-
-  if (loading) return <div className="flex items-center justify-center h-64"><p className="text-slate-400">読み込み中...</p></div>
-
-  return (
-    <div className="p-6 space-y-5 max-w-3xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">予算内訳マスタ</h1>
-          <p className="text-sm text-slate-500 mt-0.5">各カテゴリを最大10件まで内訳（明細）に分割できます。予算管理画面で内訳ごとに月次金額を入力すると、合計がそのカテゴリの予算として表示されます。</p>
-        </div>
-        <Link href="/budget" className="text-xs px-2.5 py-1.5 rounded border hover:bg-slate-50 text-slate-600 shrink-0">← 予算管理に戻る</Link>
-      </div>
-      <div className="space-y-3">
-        {CATEGORIES.map(cat => {
-          const list = byCategory(cat)
-          const full = list.length >= 10
-          return (
-            <Card key={cat}>
-              <CardContent className="pt-4 pb-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold">{cat}</p>
-                  <span className="text-xs text-slate-400">{list.length}/10件</span>
-                </div>
-                {list.length > 0 && (
-                  <div className="space-y-1">
-                    {list.map(li => (
-                      <div key={li.id} className="flex items-center justify-between text-sm px-3 py-1.5 rounded bg-slate-50">
-                        <span>{li.label}</span>
-                        <button onClick={() => removeItem(li.id)} className="text-xs text-red-500 hover:text-red-700">削除</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {!full ? (
-                  <div className="flex gap-2 pt-1">
-                    <Input value={newLabel[cat] ?? ''} onChange={e => setNewLabel(f => ({ ...f, [cat]: e.target.value }))}
-                      placeholder="内訳名（例: オフィス家賃）" className="h-8 text-sm flex-1"
-                      onKeyDown={e => { if (e.key === 'Enter') addItem(cat) }} />
-                    <Button size="sm" variant="outline" className="h-8" onClick={() => addItem(cat)} disabled={busy===cat || !(newLabel[cat]??'').trim()}>
-                      <Plus size={13} className="mr-1"/>追加
-                    </Button>
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-slate-400 pt-1">上限（10件）に達しています</p>
-                )}
-              </CardContent>
-            </Card>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 const STATUS_MAP = {
   draft:{label:'草稿',cls:'bg-amber-100 text-amber-800'},
   reviewing:{label:'確認中',cls:'bg-blue-100 text-blue-800'},
@@ -967,6 +239,7 @@ const STATUS_MAP = {
 } as const
 
 export function ReportsContent() {
+  const { t, lang, locale } = useI18n()
   const supabase = createBrowserClient()
   const now = new Date()
   const [year,setYear]=useState(now.getFullYear()); const [month,setMonth]=useState(now.getMonth()+1)
@@ -988,7 +261,7 @@ export function ReportsContent() {
       supabase.from('expenses').select('*').gte('expense_date',start).lt('expense_date',end),
       supabase.from('budgets').select('*').eq('fiscal_year',year).in('month',[0,month]),
     ])
-    const res=await fetch('/api/reports/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({year,month,activities:aRes.data??[],expenses:eRes.data??[],budgets:bRes.data??[]})})
+    const res=await fetch('/api/reports/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang,year,month,activities:aRes.data??[],expenses:eRes.data??[],budgets:bRes.data??[]})})
     const data=await res.json()
     if(data.draft) setText(data.draft)
     setGenerating(false); loadReport()
@@ -1005,31 +278,31 @@ export function ReportsContent() {
   return (
     <div className="p-6 space-y-4 max-w-4xl">
       <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">月次レポート</h1><p className="text-sm text-slate-500 mt-0.5">AIが活動・経費データから報告書を自動生成します</p></div>
-        {status&&<span className={`text-xs px-2.5 py-1 rounded-full font-medium ${STATUS_MAP[status].cls}`}>{STATUS_MAP[status].label}</span>}
+        <div><h1 className="text-xl font-bold text-slate-900">{t('月次レポート')}</h1><p className="text-sm text-slate-500 mt-0.5">{t('AIが活動・経費データから報告書を自動生成します')}</p></div>
+        {status&&<span className={`text-xs px-2.5 py-1 rounded-full font-medium ${STATUS_MAP[status].cls}`}>{t(STATUS_MAP[status].label)}</span>}
       </div>
       <div className="flex gap-3">
-        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{y}年</SelectItem>)}</SelectContent></Select>
-        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{m}月</SelectItem>)}</SelectContent></Select>
+        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{t('{y}年',{y})}</SelectItem>)}</SelectContent></Select>
+        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{t('{m}月',{m})}</SelectItem>)}</SelectContent></Select>
       </div>
       {status!=='finalized'&&(
         <Card className="border-dashed border-slate-300"><CardContent className="pt-6 text-center space-y-3">
-          <p className="text-sm text-slate-500">{report?'報告書を再生成します':`${year}年${month}月の活動・経費データから報告書を自動作成します`}</p>
+          <p className="text-sm text-slate-500">{report?t('報告書を再生成します'):t('{y}年{m}月の活動・経費データから報告書を自動作成します',{y:year,m:month})}</p>
           <Button size="lg" onClick={generate} disabled={generating} className="min-w-48 bg-blue-600 hover:bg-blue-700">
-            <Sparkles size={16} className="mr-2"/>{generating?<span className="flex items-center gap-2"><span className="animate-spin">⟳</span>生成中...</span>:'AIで月次報告書を生成'}
+            <Sparkles size={16} className="mr-2"/>{generating?<span className="flex items-center gap-2"><span className="animate-spin">⟳</span>{t('生成中...')}</span>:t('AIで月次報告書を生成')}
           </Button>
         </CardContent></Card>
       )}
       {text&&(
         <Card><CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-medium">{year}年{month}月 報告書{report?.generated_at&&<span className="text-xs font-normal text-slate-400 ml-2">生成: {new Date(report.generated_at).toLocaleString('ja-JP')}</span>}</CardTitle>
+            <CardTitle className="text-sm font-medium">{t('{y}年{m}月 報告書',{y:year,m:month})}{report?.generated_at&&<span className="text-xs font-normal text-slate-400 ml-2">{t('生成:')} {new Date(report.generated_at).toLocaleString(locale)}</span>}</CardTitle>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={()=>{const h=`<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><title>${year}年${month}月</title><style>body{font-family:'Hiragino Kaku Gothic Pro',sans-serif;font-size:12px;line-height:1.9;margin:30mm 20mm}pre{white-space:pre-wrap;font-family:inherit}</style></head><body><h1>${year}年${month}月 タイ駐在員事務所 月次報告書</h1><pre>${text}</pre></body></html>`;const w=window.open('','_blank');if(w){w.document.write(h);w.document.close();w.print()}}}>
-                <FileText size={13} className="mr-1"/>PDF印刷
+              <Button variant="outline" size="sm" onClick={()=>{const h=`<!DOCTYPE html><html lang="${lang}"><head><meta charset="UTF-8"><title>${t('{y}年{m}月',{y:year,m:month})}</title><style>body{font-family:'Hiragino Kaku Gothic Pro',sans-serif;font-size:12px;line-height:1.9;margin:30mm 20mm}pre{white-space:pre-wrap;font-family:inherit}</style></head><body><h1>${t('{y}年{m}月 タイ駐在員事務所 月次報告書',{y:year,m:month})}</h1><pre>${text}</pre></body></html>`;const w=window.open('','_blank');if(w){w.document.write(h);w.document.close();w.print()}}}>
+                <FileText size={13} className="mr-1"/>{t('PDF印刷')}
               </Button>
-              <Button variant="outline" size="sm" onClick={()=>{const b=new Blob(['\uFEFF'+text],{type:'text/plain;charset=utf-8;'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`${year}年${month}月_月次報告書.txt`;a.click()}}>
-                <Download size={13} className="mr-1"/>保存
+              <Button variant="outline" size="sm" onClick={()=>{const b=new Blob(['\uFEFF'+text],{type:'text/plain;charset=utf-8;'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`${t('{y}年{m}月_月次報告書',{y:year,m:month})}.txt`;a.click()}}>
+                <Download size={13} className="mr-1"/>{t('保存')}
               </Button>
             </div>
           </div>
@@ -1037,10 +310,10 @@ export function ReportsContent() {
         <CardContent className="space-y-3">
           <textarea value={text} onChange={e=>setText(e.target.value)} className="w-full min-h-[500px] text-sm font-mono leading-relaxed resize-none border rounded-lg p-3 focus:outline-none focus:ring-1 focus:ring-blue-500 bg-slate-50" disabled={status==='finalized'}/>
           {status!=='finalized'&&<div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={()=>saveReport(false)} disabled={saving}>{saving?'保存中...':'一時保存'}</Button>
-            <Button size="sm" onClick={()=>saveReport(true)} disabled={saving} className="bg-green-600 hover:bg-green-700"><Check size={14} className="mr-1"/>{saving?'保存中...':'確定・提出完了'}</Button>
+            <Button variant="outline" size="sm" onClick={()=>saveReport(false)} disabled={saving}>{saving?t('保存中...'):t('一時保存')}</Button>
+            <Button size="sm" onClick={()=>saveReport(true)} disabled={saving} className="bg-green-600 hover:bg-green-700"><Check size={14} className="mr-1"/>{saving?t('保存中...'):t('確定・提出完了')}</Button>
           </div>}
-          {status==='finalized'&&<p className="text-xs text-slate-400 text-right">確定: {report?.finalized_at?new Date(report.finalized_at).toLocaleString('ja-JP'):'—'}</p>}
+          {status==='finalized'&&<p className="text-xs text-slate-400 text-right">{t('確定:')} {report?.finalized_at?new Date(report.finalized_at).toLocaleString(locale):'—'}</p>}
         </CardContent></Card>
       )}
     </div>
@@ -1059,6 +332,7 @@ interface Payroll {
 }
 
 export function PayrollPage() {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const now = new Date()
   const [year, setYear] = useState(now.getFullYear())
@@ -1093,45 +367,45 @@ export function PayrollPage() {
   return (
     <div className="p-6 space-y-4 max-w-4xl">
       <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">給与管理</h1><p className="text-sm text-slate-500 mt-0.5">{year}年{month}月</p></div>
-        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'給与を追加'}</Button>
+        <div><h1 className="text-xl font-bold text-slate-900">{t('給与管理')}</h1><p className="text-sm text-slate-500 mt-0.5">{t('{y}年{m}月',{y:year,m:month})}</p></div>
+        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?t('閉じる'):t('給与を追加')}</Button>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[{l:'基本給合計',v:fmtThbJpy(totalBase)},{l:'社会保険合計',v:fmtThbJpy(totalSS)},{l:'源泉徴収合計',v:fmtThbJpy(totalWT)},{l:'手取り合計',v:fmtThbJpy(totalNet)}].map(c=>(
+        {[{l:t('基本給合計'),v:fmtThbJpy(totalBase)},{l:t('社会保険合計'),v:fmtThbJpy(totalSS)},{l:t('源泉徴収合計'),v:fmtThbJpy(totalWT)},{l:t('手取り合計'),v:fmtThbJpy(totalNet)}].map(c=>(
           <Card key={c.l}><CardContent className="pt-4 pb-3"><p className="text-xs text-slate-500 mb-1">{c.l}</p><p className="text-sm font-bold">{c.v}</p></CardContent></Card>
         ))}
       </div>
       <div className="flex gap-2">
-        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{y}年</SelectItem>)}</SelectContent></Select>
-        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{m}月</SelectItem>)}</SelectContent></Select>
+        <Select value={String(year)} onValueChange={v=>setYear(Number(v))}><SelectTrigger className="w-24 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{[now.getFullYear()-1,now.getFullYear()].map(y=><SelectItem key={y} value={String(y)}>{t('{y}年',{y})}</SelectItem>)}</SelectContent></Select>
+        <Select value={String(month)} onValueChange={v=>setMonth(Number(v))}><SelectTrigger className="w-20 h-8 text-sm"><SelectValue/></SelectTrigger><SelectContent>{Array.from({length:12},(_,i)=>i+1).map(m=><SelectItem key={m} value={String(m)}>{t('{m}月',{m})}</SelectItem>)}</SelectContent></Select>
       </div>
       {showNew&&(
         <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
-          <p className="text-sm font-semibold">給与入力</p>
+          <p className="text-sm font-semibold">{t('給与入力')}</p>
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">氏名</Label><Input value={form.employee_name} onChange={e=>setForm(f=>({...f,employee_name:e.target.value}))} className="h-8 text-sm" placeholder="山田太郎"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">支払日</Label><Input type="date" value={form.paid_at} onChange={e=>setForm(f=>({...f,paid_at:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('氏名')}</Label><Input value={form.employee_name} onChange={e=>setForm(f=>({...f,employee_name:e.target.value}))} className="h-8 text-sm" placeholder={t('山田太郎')}/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('支払日')}</Label><Input type="date" value={form.paid_at} onChange={e=>setForm(f=>({...f,paid_at:e.target.value}))} className="h-8 text-sm"/></div>
           </div>
           <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">基本給（THB）</Label><Input type="number" value={form.base_salary_thb} onChange={e=>setForm(f=>({...f,base_salary_thb:e.target.value}))} className="h-8 text-sm" placeholder="0"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">社会保険（THB）</Label><Input type="number" value={form.social_security_thb} onChange={e=>setForm(f=>({...f,social_security_thb:e.target.value}))} className="h-8 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">源泉徴収（THB）</Label><Input type="number" value={form.withholding_tax_thb} onChange={e=>setForm(f=>({...f,withholding_tax_thb:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('基本給（THB）')}</Label><Input type="number" value={form.base_salary_thb} onChange={e=>setForm(f=>({...f,base_salary_thb:e.target.value}))} className="h-8 text-sm" placeholder="0"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('社会保険（THB）')}</Label><Input type="number" value={form.social_security_thb} onChange={e=>setForm(f=>({...f,social_security_thb:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('源泉徴収（THB）')}</Label><Input type="number" value={form.withholding_tax_thb} onChange={e=>setForm(f=>({...f,withholding_tax_thb:e.target.value}))} className="h-8 text-sm"/></div>
           </div>
-          {form.base_salary_thb&&<div className="bg-white rounded-lg p-3 border border-blue-100"><p className="text-xs text-slate-500 mb-1">手取り（計算結果）</p><p className="text-lg font-bold text-blue-700">{fmtThbJpy(netSalary)}</p></div>}
-          <Button size="sm" onClick={savePayroll} disabled={saving||!form.employee_name||!form.base_salary_thb} className="w-full">{saving?'保存中...':'給与を保存'}</Button>
+          {form.base_salary_thb&&<div className="bg-white rounded-lg p-3 border border-blue-100"><p className="text-xs text-slate-500 mb-1">{t('手取り（計算結果）')}</p><p className="text-lg font-bold text-blue-700">{fmtThbJpy(netSalary)}</p></div>}
+          <Button size="sm" onClick={savePayroll} disabled={saving||!form.employee_name||!form.base_salary_thb} className="w-full">{saving?t('保存中...'):t('給与を保存')}</Button>
         </CardContent></Card>
       )}
       <Card><CardContent className="p-0">
-        {loading?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">読み込み中...</p></div>
-        :records.length===0?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">データがありません</p></div>
+        {loading?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">{t('読み込み中...')}</p></div>
+        :records.length===0?<div className="flex items-center justify-center h-32"><p className="text-sm text-slate-400">{t('データがありません')}</p></div>
         :<div className="overflow-x-auto"><table className="w-full text-sm">
           <thead><tr className="border-b bg-slate-50">
-            <th className="text-left py-2.5 px-4 text-xs font-medium text-slate-500">氏名</th>
-            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">基本給</th>
-            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">社保</th>
-            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">源泉</th>
-            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">手取り</th>
-            <th className="text-left py-2.5 px-3 text-xs font-medium text-slate-500">支払日</th>
+            <th className="text-left py-2.5 px-4 text-xs font-medium text-slate-500">{t('氏名')}</th>
+            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">{t('基本給')}</th>
+            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">{t('社保')}</th>
+            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">{t('源泉')}</th>
+            <th className="text-right py-2.5 px-3 text-xs font-medium text-slate-500">{t('手取り')}</th>
+            <th className="text-left py-2.5 px-3 text-xs font-medium text-slate-500">{t('支払日')}</th>
           </tr></thead>
           <tbody>{records.map(r=>(
             <tr key={r.id} className="border-b hover:bg-slate-50">
@@ -1140,11 +414,11 @@ export function PayrollPage() {
               <td className="py-3 px-3 text-right text-slate-500">฿{r.social_security_thb.toLocaleString()}</td>
               <td className="py-3 px-3 text-right text-slate-500">฿{r.withholding_tax_thb.toLocaleString()}</td>
               <td className="py-3 px-3 text-right"><div className="font-bold text-blue-700">฿{r.net_salary_thb.toLocaleString()}</div><div className="text-xs text-slate-400">¥{Math.round(r.net_salary_thb*PAYROLL_RATE).toLocaleString()}</div></td>
-              <td className="py-3 px-3 text-slate-500 text-xs">{r.paid_at??'未払い'}</td>
+              <td className="py-3 px-3 text-slate-500 text-xs">{r.paid_at??t('未払い')}</td>
             </tr>
           ))}</tbody>
           <tfoot><tr className="border-t-2 bg-slate-50">
-            <td className="py-2.5 px-4 font-bold text-sm">合計</td>
+            <td className="py-2.5 px-4 font-bold text-sm">{t('合計')}</td>
             <td className="py-2.5 px-3 text-right"><div className="font-bold">฿{Math.round(totalBase).toLocaleString()}</div><div className="text-xs text-slate-400">¥{Math.round(totalBase*PAYROLL_RATE).toLocaleString()}</div></td>
             <td className="py-2.5 px-3 text-right text-slate-500">฿{Math.round(totalSS).toLocaleString()}</td>
             <td className="py-2.5 px-3 text-right text-slate-500">฿{Math.round(totalWT).toLocaleString()}</td>
@@ -1164,6 +438,7 @@ interface TaxEvent {
 }
 
 export function TaxCalendarPage() {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const [events, setEvents] = useState<TaxEvent[]>([])
   const [loading, setLoading] = useState(true)
@@ -1191,40 +466,40 @@ export function TaxCalendarPage() {
   return (
     <div className="p-6 space-y-4 max-w-3xl">
       <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">税務カレンダー</h1><p className="text-sm text-slate-500 mt-0.5">申告・納税期限の管理</p></div>
-        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'期限を追加'}</Button>
+        <div><h1 className="text-xl font-bold text-slate-900">{t('税務カレンダー')}</h1><p className="text-sm text-slate-500 mt-0.5">{t('申告・納税期限の管理')}</p></div>
+        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?t('閉じる'):t('期限を追加')}</Button>
       </div>
       <div className="grid grid-cols-3 gap-3">
-        <Card className="border-red-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-red-600">{overdue.length}</p><p className="text-xs text-slate-500 mt-1">期限超過</p></CardContent></Card>
-        <Card className="border-amber-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-amber-600">{upcoming.length}</p><p className="text-xs text-slate-500 mt-1">対応待ち</p></CardContent></Card>
-        <Card className="border-green-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-green-600">{done.length}</p><p className="text-xs text-slate-500 mt-1">完了済み</p></CardContent></Card>
+        <Card className="border-red-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-red-600">{overdue.length}</p><p className="text-xs text-slate-500 mt-1">{t('期限超過')}</p></CardContent></Card>
+        <Card className="border-amber-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-amber-600">{upcoming.length}</p><p className="text-xs text-slate-500 mt-1">{t('対応待ち')}</p></CardContent></Card>
+        <Card className="border-green-200"><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold text-green-600">{done.length}</p><p className="text-xs text-slate-500 mt-1">{t('完了済み')}</p></CardContent></Card>
       </div>
       {showNew&&(
         <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
-          <Input placeholder="タイトル（例：源泉徴収税 月次申告 PND1）" value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} className="h-8 text-sm"/>
+          <Input placeholder={t('タイトル（例：源泉徴収税 月次申告 PND1）')} value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} className="h-8 text-sm"/>
           <div className="grid grid-cols-2 gap-3">
             <Input type="date" value={form.due_date} onChange={e=>setForm(f=>({...f,due_date:e.target.value}))} className="h-8 text-sm"/>
-            <Input type="number" placeholder="金額（THB・任意）" value={form.amount_thb} onChange={e=>setForm(f=>({...f,amount_thb:e.target.value}))} className="h-8 text-sm"/>
+            <Input type="number" placeholder={t('金額（THB・任意）')} value={form.amount_thb} onChange={e=>setForm(f=>({...f,amount_thb:e.target.value}))} className="h-8 text-sm"/>
           </div>
-          <Button size="sm" onClick={saveTax} disabled={saving||!form.title||!form.due_date} className="w-full">{saving?'保存中...':'追加する'}</Button>
+          <Button size="sm" onClick={saveTax} disabled={saving||!form.title||!form.due_date} className="w-full">{saving?t('保存中...'):t('追加する')}</Button>
         </CardContent></Card>
       )}
-      {loading?<div className="text-center py-8 text-slate-400">読み込み中...</div>:(
+      {loading?<div className="text-center py-8 text-slate-400">{t('読み込み中...')}</div>:(
         <div className="space-y-3">
-          {overdue.length>0&&<div><p className="text-sm font-semibold text-red-600 mb-2">⚠ 期限超過</p><div className="space-y-2">{overdue.map(e=>(
+          {overdue.length>0&&<div><p className="text-sm font-semibold text-red-600 mb-2">{t('⚠ 期限超過')}</p><div className="space-y-2">{overdue.map(e=>(
             <Card key={e.id} className="border-red-200"><CardContent className="pt-3 pb-3 flex items-center gap-3">
-              <div className="flex-1"><p className="text-sm font-medium">{e.title}</p><div className="text-xs text-slate-500 flex gap-3 mt-0.5"><span>期限: {e.due_date}</span><span className="text-red-600">{Math.abs(daysLeft(e.due_date))}日超過</span>{e.amount_thb&&<span>฿{e.amount_thb.toLocaleString()}（¥{Math.round(e.amount_thb*4.2).toLocaleString()}）</span>}</div></div>
-              <Button size="sm" variant="outline" onClick={()=>markComplete(e.id)} className="text-xs h-7 shrink-0">完了</Button>
+              <div className="flex-1"><p className="text-sm font-medium">{e.title}</p><div className="text-xs text-slate-500 flex gap-3 mt-0.5"><span>{t('期限:')} {e.due_date}</span><span className="text-red-600">{t('{n}日超過',{n:Math.abs(daysLeft(e.due_date))})}</span>{e.amount_thb&&<span>฿{e.amount_thb.toLocaleString()}（¥{Math.round(e.amount_thb*4.2).toLocaleString()}）</span>}</div></div>
+              <Button size="sm" variant="outline" onClick={()=>markComplete(e.id)} className="text-xs h-7 shrink-0">{t('完了')}</Button>
             </CardContent></Card>
           ))}</div></div>}
-          {upcoming.length>0&&<div><p className="text-sm font-semibold text-slate-700 mb-2">対応待ち</p><div className="space-y-2">{upcoming.map(e=>(
+          {upcoming.length>0&&<div><p className="text-sm font-semibold text-slate-700 mb-2">{t('対応待ち')}</p><div className="space-y-2">{upcoming.map(e=>(
             <Card key={e.id}><CardContent className="pt-3 pb-3 flex items-center gap-3">
-              <div className="flex-1"><p className="text-sm font-medium">{e.title}</p><div className="text-xs text-slate-500 flex gap-3 mt-0.5"><span>期限: {e.due_date}</span><span className={daysLeft(e.due_date)<=7?'text-red-600 font-medium':daysLeft(e.due_date)<=30?'text-amber-600':''}>あと{daysLeft(e.due_date)}日</span>{e.amount_thb&&<span>฿{e.amount_thb.toLocaleString()}（¥{Math.round(e.amount_thb*4.2).toLocaleString()}）</span>}</div></div>
-              <Button size="sm" variant="outline" onClick={()=>markComplete(e.id)} className="text-xs h-7 shrink-0">完了</Button>
+              <div className="flex-1"><p className="text-sm font-medium">{e.title}</p><div className="text-xs text-slate-500 flex gap-3 mt-0.5"><span>{t('期限:')} {e.due_date}</span><span className={daysLeft(e.due_date)<=7?'text-red-600 font-medium':daysLeft(e.due_date)<=30?'text-amber-600':''}>{t('あと{n}日',{n:daysLeft(e.due_date)})}</span>{e.amount_thb&&<span>฿{e.amount_thb.toLocaleString()}（¥{Math.round(e.amount_thb*4.2).toLocaleString()}）</span>}</div></div>
+              <Button size="sm" variant="outline" onClick={()=>markComplete(e.id)} className="text-xs h-7 shrink-0">{t('完了')}</Button>
             </CardContent></Card>
           ))}</div></div>}
-          {done.length>0&&<div><p className="text-sm font-semibold text-green-600 mb-2">✓ 完了済み</p><div className="space-y-2">{done.map(e=>(
-            <Card key={e.id} className="border-green-200 opacity-60"><CardContent className="pt-3 pb-3"><p className="text-sm">{e.title}</p><p className="text-xs text-slate-400">完了日: {e.completed_at}</p></CardContent></Card>
+          {done.length>0&&<div><p className="text-sm font-semibold text-green-600 mb-2">{t('✓ 完了済み')}</p><div className="space-y-2">{done.map(e=>(
+            <Card key={e.id} className="border-green-200 opacity-60"><CardContent className="pt-3 pb-3"><p className="text-sm">{e.title}</p><p className="text-xs text-slate-400">{t('完了日:')} {e.completed_at}</p></CardContent></Card>
           ))}</div></div>}
         </div>
       )}
@@ -1240,6 +515,7 @@ interface VisaWP {
 }
 
 export function VisaWPPage() {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const [records, setRecords] = useState<VisaWP[]>([])
   const [loading, setLoading] = useState(true)
@@ -1262,33 +538,33 @@ export function VisaWPPage() {
   return (
     <div className="p-6 space-y-4 max-w-3xl">
       <div className="flex items-center justify-between">
-        <div><h1 className="text-xl font-bold text-slate-900">ビザ・WP管理</h1><p className="text-sm text-slate-500 mt-0.5">有効期限・90日報告の管理</p></div>
-        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?'閉じる':'追加'}</Button>
+        <div><h1 className="text-xl font-bold text-slate-900">{t('ビザ・WP管理')}</h1><p className="text-sm text-slate-500 mt-0.5">{t('有効期限・90日報告の管理')}</p></div>
+        <Button size="sm" onClick={()=>setShowNew(v=>!v)}><Plus size={13} className="mr-1"/>{showNew?t('閉じる'):t('追加')}</Button>
       </div>
       <div className="grid grid-cols-3 gap-3">
-        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold">{records.length}</p><p className="text-xs text-slate-500 mt-1">登録件数</p></CardContent></Card>
-        <Card className={expiringSoon.length>0?'border-amber-300':''}><CardContent className="pt-4 pb-3 text-center"><p className={`text-2xl font-bold ${expiringSoon.length>0?'text-amber-600':''}`}>{expiringSoon.length}</p><p className="text-xs text-slate-500 mt-1">90日以内期限切れ</p></CardContent></Card>
-        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold">{records.filter(r=>r.ninety_day_report_due&&daysUntil(r.ninety_day_report_due)<=30&&daysUntil(r.ninety_day_report_due)>0).length}</p><p className="text-xs text-slate-500 mt-1">90日報告期限迫る</p></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold">{records.length}</p><p className="text-xs text-slate-500 mt-1">{t('登録件数')}</p></CardContent></Card>
+        <Card className={expiringSoon.length>0?'border-amber-300':''}><CardContent className="pt-4 pb-3 text-center"><p className={`text-2xl font-bold ${expiringSoon.length>0?'text-amber-600':''}`}>{expiringSoon.length}</p><p className="text-xs text-slate-500 mt-1">{t('90日以内期限切れ')}</p></CardContent></Card>
+        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-2xl font-bold">{records.filter(r=>r.ninety_day_report_due&&daysUntil(r.ninety_day_report_due)<=30&&daysUntil(r.ninety_day_report_due)>0).length}</p><p className="text-xs text-slate-500 mt-1">{t('90日報告期限迫る')}</p></CardContent></Card>
       </div>
       {showNew&&(
         <Card className="border-blue-200 bg-blue-50/30"><CardContent className="pt-4 space-y-3">
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1"><Label className="text-xs text-slate-500">氏名</Label><Input value={form.employee_name} onChange={e=>setForm(f=>({...f,employee_name:e.target.value}))} className="h-8 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">種類</Label>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('氏名')}</Label><Input value={form.employee_name} onChange={e=>setForm(f=>({...f,employee_name:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('種類')}</Label>
               <Select value={form.document_type} onValueChange={v=>setForm(f=>({...f,document_type:v}))}>
                 <SelectTrigger className="h-8 text-sm"><SelectValue/></SelectTrigger>
-                <SelectContent><SelectItem value="visa">ビザ</SelectItem><SelectItem value="work_permit">労働許可証（WP）</SelectItem></SelectContent>
+                <SelectContent><SelectItem value="visa">{t('ビザ')}</SelectItem><SelectItem value="work_permit">{t('労働許可証（WP）')}</SelectItem></SelectContent>
               </Select></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">発行日</Label><Input type="date" value={form.issue_date} onChange={e=>setForm(f=>({...f,issue_date:e.target.value}))} className="h-8 text-sm"/></div>
-            <div className="space-y-1"><Label className="text-xs text-slate-500">有効期限 *</Label><Input type="date" value={form.expiry_date} onChange={e=>setForm(f=>({...f,expiry_date:e.target.value}))} className="h-8 text-sm"/></div>
-            <div className="space-y-1 col-span-2"><Label className="text-xs text-slate-500">90日報告期限</Label><Input type="date" value={form.ninety_day_report_due} onChange={e=>setForm(f=>({...f,ninety_day_report_due:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('発行日')}</Label><Input type="date" value={form.issue_date} onChange={e=>setForm(f=>({...f,issue_date:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1"><Label className="text-xs text-slate-500">{t('有効期限 *')}</Label><Input type="date" value={form.expiry_date} onChange={e=>setForm(f=>({...f,expiry_date:e.target.value}))} className="h-8 text-sm"/></div>
+            <div className="space-y-1 col-span-2"><Label className="text-xs text-slate-500">{t('90日報告期限')}</Label><Input type="date" value={form.ninety_day_report_due} onChange={e=>setForm(f=>({...f,ninety_day_report_due:e.target.value}))} className="h-8 text-sm"/></div>
           </div>
-          <Button size="sm" onClick={saveVisa} disabled={saving||!form.employee_name||!form.expiry_date} className="w-full">{saving?'保存中...':'登録する'}</Button>
+          <Button size="sm" onClick={saveVisa} disabled={saving||!form.employee_name||!form.expiry_date} className="w-full">{saving?t('保存中...'):t('登録する')}</Button>
         </CardContent></Card>
       )}
       <div className="space-y-2">
-        {loading?<div className="text-center py-8 text-slate-400">読み込み中...</div>
-        :records.length===0?<div className="text-center py-8 text-slate-400">データがありません</div>
+        {loading?<div className="text-center py-8 text-slate-400">{t('読み込み中...')}</div>
+        :records.length===0?<div className="text-center py-8 text-slate-400">{t('データがありません')}</div>
         :records.map(r=>{
           const days=daysUntil(r.expiry_date); const urgent=days<=90
           return (
@@ -1296,13 +572,13 @@ export function VisaWPPage() {
               <CardContent className="pt-3 pb-3">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="font-medium text-sm">{r.employee_name}</span>
-                  <span className="text-xs bg-slate-100 px-2 py-0.5 rounded">{r.document_type==='visa'?'ビザ':'労働許可証'}</span>
-                  {urgent&&<span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">あと{days}日</span>}
+                  <span className="text-xs bg-slate-100 px-2 py-0.5 rounded">{r.document_type==='visa'?t('ビザ'):t('労働許可証')}</span>
+                  {urgent&&<span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">{t('あと{n}日',{n:days})}</span>}
                 </div>
                 <div className="text-xs text-slate-500 space-y-0.5">
-                  {r.issue_date&&<p>発行日: {r.issue_date}</p>}
-                  <p className={urgent?'text-amber-700 font-medium':''}>有効期限: {r.expiry_date}</p>
-                  {r.ninety_day_report_due&&<p className={daysUntil(r.ninety_day_report_due)<=30?'text-red-600 font-medium':''}>90日報告期限: {r.ninety_day_report_due}（あと{daysUntil(r.ninety_day_report_due)}日）</p>}
+                  {r.issue_date&&<p>{t('発行日:')} {r.issue_date}</p>}
+                  <p className={urgent?'text-amber-700 font-medium':''}>{t('有効期限:')} {r.expiry_date}</p>
+                  {r.ninety_day_report_due&&<p className={daysUntil(r.ninety_day_report_due)<=30?'text-red-600 font-medium':''}>{t('90日報告期限:')} {r.ninety_day_report_due}（{t('あと{n}日',{n:daysUntil(r.ninety_day_report_due)})}）</p>}
                 </div>
               </CardContent>
             </Card>
@@ -1315,6 +591,7 @@ export function VisaWPPage() {
 
 // ─── システム設定 ──────────────────────────────────────────────
 export function SettingsPage() {
+  const { t, locale } = useI18n()
   const supabase = createBrowserClient()
   const [rate, setRate] = useState('')
   const [loading, setLoading] = useState(true)
@@ -1330,21 +607,21 @@ export function SettingsPage() {
     if (!rate || isNaN(parseFloat(rate))) return
     setSaving(true)
     await supabase.from('settings').update({ value: rate, updated_at: new Date().toISOString() }).eq('key', 'exchange_rate')
-    setSaving(false); setMsg('保存しました'); setTimeout(() => setMsg(''), 3000)
+    setSaving(false); setMsg(t('保存しました')); setTimeout(() => setMsg(''), 3000)
   }
 
   return (
     <div className="p-6 space-y-6 max-w-xl">
-      <div><h1 className="text-xl font-bold text-slate-900">システム設定</h1>
-        <p className="text-sm text-slate-500 mt-0.5">為替レートなどの基本設定</p></div>
+      <div><h1 className="text-xl font-bold text-slate-900">{t('システム設定')}</h1>
+        <p className="text-sm text-slate-500 mt-0.5">{t('為替レートなどの基本設定')}</p></div>
 
       <Card><CardContent className="pt-5 space-y-4">
         <div>
-          <p className="text-sm font-semibold text-slate-700 mb-3">為替レート設定</p>
-          {loading ? <p className="text-sm text-slate-400">読み込み中...</p> : (
+          <p className="text-sm font-semibold text-slate-700 mb-3">{t('為替レート設定')}</p>
+          {loading ? <p className="text-sm text-slate-400">{t('読み込み中...')}</p> : (
             <div className="space-y-3">
               <div className="space-y-1">
-                <Label className="text-xs text-slate-500">1 THB = ? 円</Label>
+                <Label className="text-xs text-slate-500">{t('1 THB = ? 円')}</Label>
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 flex-1">
                     <span className="text-sm text-slate-500">1 THB =</span>
@@ -1356,21 +633,21 @@ export function SettingsPage() {
                       className="w-32 h-9 text-sm"
                       placeholder="4.80"
                     />
-                    <span className="text-sm text-slate-500">円</span>
+                    <span className="text-sm text-slate-500">{t('円')}</span>
                   </div>
                   <Button size="sm" onClick={save} disabled={saving} className="shrink-0">
-                    {saving ? '保存中...' : '保存'}
+                    {saving ?t('保存中...'):t('保存')}
                   </Button>
                 </div>
               </div>
               {rate && !isNaN(parseFloat(rate)) && (
                 <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700">
-                  <p>例：฿10,000 = ¥{Math.round(10000 * parseFloat(rate)).toLocaleString()}</p>
-                  <p>例：฿100,000 = ¥{Math.round(100000 * parseFloat(rate)).toLocaleString()}</p>
+                  <p>{t('例：')}฿10,000 = ¥{Math.round(10000 * parseFloat(rate)).toLocaleString()}</p>
+                  <p>{t('例：')}฿100,000 = ¥{Math.round(100000 * parseFloat(rate)).toLocaleString()}</p>
                 </div>
               )}
               {msg && <p className="text-sm text-green-600">{msg}</p>}
-              <p className="text-xs text-slate-400">※ 変更後は新規入力分から反映されます。過去データの換算値は変わりません。</p>
+              <p className="text-xs text-slate-400">{t('※ 変更後は新規入力分から反映されます。過去データの換算値は変わりません。')}</p>
             </div>
           )}
         </div>

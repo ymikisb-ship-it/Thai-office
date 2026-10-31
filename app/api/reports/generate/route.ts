@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { EN } from '@/lib/i18n/dict.en'
+import { TH } from '@/lib/i18n/dict.th'
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerClient()
@@ -8,6 +10,13 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json()
+  const lang: 'ja' | 'en' | 'th' = body.lang === 'en' || body.lang === 'th' ? body.lang : 'ja'
+  const dict: Record<string, string> | null = lang === 'en' ? EN : lang === 'th' ? TH : null
+  const t = (ja: string, v?: Record<string, string | number>) => {
+    const s = (dict && dict[ja]) || ja
+    return v ? s.replace(/\{(\w+)\}/g, (m, k) => (k in v ? String(v[k]) : m)) : s
+  }
+  const langName = lang === 'en' ? 'English' : lang === 'th' ? 'Thai (ภาษาไทย)' : '日本語'
   const year: number = body.year
   const month: number = body.month
   const activities: any[] = body.activities ?? []
@@ -25,7 +34,8 @@ export async function POST(req: NextRequest) {
     byCat[e.category].thb+=e.amount_thb; byCat[e.category].jpy+=e.amount_jpy
   }
 
-  const prompt = `あなたは日系企業のタイ駐在員事務所担当者です。${year}年${month}月の月次報告書を作成してください。
+  const langNote = lang === 'ja' ? '' : `\n\n[Language] Write the entire report in ${langName}. Translate Japanese category/type names into ${langName}.`
+  const prompt = `あなたは日系企業のタイ駐在員事務所担当者です。${year}年${month}月の月次報告書を作成してください。${langNote}
 
 【形式】日本企業本社向け、簡潔で要点を押さえた月次報告書。
 
@@ -65,12 +75,27 @@ ${budgets.filter(b=>b.month===month).map(b=>{
       messages: [{ role:'user', content:prompt }],
     })
     draft = message.content.filter(b=>b.type==='text').map(b=>(b as {type:'text';text:string}).text).join('')
+  } else if (lang !== 'ja') {
+    const dash = t('・（記録なし）')
+    const list = (arr: string[]) => arr.join('\n') || dash
+    draft = [
+      t('{y}年{m}月 タイ駐在員事務所 月次報告書', { y: year, m: month }), '='.repeat(40), '',
+      t('① 活動サマリー'), t('{m}月は{n}件の活動を実施、{c}社との商談・情報交換を行いました。', { m: month, n: activities.length, c: companies.length }), '',
+      t('② 訪問企業一覧'), list(companies.map(c => `・${c}`)), '',
+      t('③ 活動件数集計'), list(Object.entries(byType).map(([k, v]) => `・${t(k)}: ${v}`)), '',
+      t('④ 経費実績'), `${t('合計:')} ฿${Math.round(totalThb).toLocaleString()} (¥${Math.round(totalJpy).toLocaleString()})`,
+      list(Object.entries(byCat).map(([k, v]) => `・${t(k)}: ฿${Math.round(v.thb).toLocaleString()} (¥${Math.round(v.jpy).toLocaleString()})`)), '',
+      t('⑤ 予算差異'), t('各カテゴリ概ね計画内で推移しました。'), '',
+      t('⑥ 翌月活動予定'), t('継続的な顧客フォローと新規開拓活動を予定しています。'), '',
+      t('⑦ 総括・特記事項'), t('引き続き現地での情報収集と関係構築に注力します。'), '',
+      t('※ ANTHROPIC_API_KEY を Netlify の環境変数に設定するとAIが詳細な報告書を生成します。'),
+    ].join('\n')
   } else {
     draft = `${year}年${month}月 タイ駐在員事務所 月次報告書\n${'='.repeat(40)}\n\n① 活動サマリー\n${month}月は${activities.length}件の活動を実施、${companies.length}社との商談・情報交換を行いました。\n\n② 訪問企業一覧\n${companies.map(c=>`・${c}`).join('\n')||'・（記録なし）'}\n\n③ 活動件数集計\n${Object.entries(byType).map(([k,v])=>`・${k}: ${v}件`).join('\n')||'・（記録なし）'}\n\n④ 経費実績\n合計: ฿${Math.round(totalThb).toLocaleString()}（¥${Math.round(totalJpy).toLocaleString()}）\n${Object.entries(byCat).map(([k,v])=>`・${k}: ฿${Math.round(v.thb).toLocaleString()}（¥${Math.round(v.jpy).toLocaleString()}）`).join('\n')||'・（記録なし）'}\n\n⑤ 予算差異\n各カテゴリ概ね計画内で推移しました。\n\n⑥ 翌月活動予定\n継続的な顧客フォローと新規開拓活動を予定しています。\n\n⑦ 総括・特記事項\n引き続き現地での情報収集と関係構築に注力します。\n\n※ ANTHROPIC_API_KEY を Netlify の環境変数に設定するとAIが詳細な報告書を生成します。`
   }
 
   const { data: existing } = await supabase.from('monthly_reports').select('id,status').eq('year',year).eq('month',month).single()
-  if (existing?.status === 'finalized') return NextResponse.json({ error:'確定済みのレポートは再生成できません' }, { status:400 })
+  if (existing?.status === 'finalized') return NextResponse.json({ error:t('確定済みのレポートは再生成できません') }, { status:400 })
 
   const reportData = { year, month, ai_draft:draft, final_text:draft, status:'draft', generated_at:new Date().toISOString() }
   if (existing) { await supabase.from('monthly_reports').update(reportData).eq('id',(existing as any).id) }

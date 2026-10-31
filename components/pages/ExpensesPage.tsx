@@ -318,8 +318,8 @@ export function ExpensesPage(_props: Props = {}) {
       const budgets: Record<string, number> = {}
       for (const b of bud.data ?? []) budgets[b.item_code] = Number(b.amount_thb)
       const { buildMonthWorkbook } = await import('@/lib/excel/exportMonth')
-      const buf = await buildMonthWorkbook({ ym, expenses: rows, items, budgets })
-      downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `経費実績明細_${ym}.xlsx`)
+      const buf = await buildMonthWorkbook({ ym, expenses: rows, items, budgets, lang, t, itemName, catName })
+      downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${t('経費実績明細_{ym}', { ym })}.xlsx`)
       const total = rows.reduce((s, r) => s + Number(r.amount_thb), 0)
       // 出力日時はDBの時刻(now())を使う。再出力時は一度削除して作り直す
       const del = await supabase.from('month_exports').delete().eq('ym', ym)
@@ -347,7 +347,7 @@ export function ExpensesPage(_props: Props = {}) {
         setBusy(`${t('領収書をまとめています…')} ${++done}/${withFiles.length}`)
       }
       const blob = await zip.generateAsync({ type: 'blob' })
-      downloadBlob(blob, `領収書_${ym}.zip`)
+      downloadBlob(blob, `${t('領収書_{ym}', { ym })}.zip`)
       flash('ok', t('領収書{n}件をZIPにしました', { n: withFiles.length }))
     } catch (e) { flash('err', t('ZIP作成に失敗しました: {msg}', { msg: (e as Error).message })) } finally { setBusy(null) }
   }
